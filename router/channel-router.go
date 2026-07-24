@@ -33,6 +33,19 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 			middleware.RequirePermission(route.permission),
 			route.handler,
 		)
+		// The collection-root handlers live at "/" (e.g. GET /api/channel/).
+		// Gin normally 301-redirects the no-slash form /api/channel to it, but
+		// that trailing-slash redirect is silently dropped once the route tree
+		// contains a root-level param wildcard (/:mode/mj) alongside a prefix
+		// split between /api/channel and /api/channel_monitor. Register the
+		// exact no-slash alias so the client's GET /api/channel resolves
+		// directly instead of 404ing.
+		if route.path == "/" {
+			channelRoute.Handle(route.method, "",
+				middleware.RequirePermission(route.permission),
+				route.handler,
+			)
+		}
 	}
 }
 

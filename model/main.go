@@ -302,8 +302,17 @@ func migrateDB() error {
 		&SystemTaskLock{},
 		&CasbinRule{},
 		&AuthzRole{},
+		&ChannelMonitorConfig{},
+		&ChannelMonitorResult{},
+		&ChannelManagedState{},
+		&ChannelRecommendation{},
+		&MonitorQuestion{},
+		&MonitorTemplate{},
 	)
 	if err != nil {
+		return err
+	}
+	if err := InitializeMonitorQuestions(); err != nil {
 		return err
 	}
 	if err := InitializeUserAuthVersions(); err != nil {
@@ -363,6 +372,12 @@ func migrateDBFast() error {
 		{&SystemInstance{}, "SystemInstance"},
 		{&SystemTask{}, "SystemTask"},
 		{&SystemTaskLock{}, "SystemTaskLock"},
+		{&ChannelMonitorConfig{}, "ChannelMonitorConfig"},
+		{&ChannelMonitorResult{}, "ChannelMonitorResult"},
+		{&ChannelManagedState{}, "ChannelManagedState"},
+		{&MonitorQuestion{}, "MonitorQuestion"},
+		{&MonitorTemplate{}, "MonitorTemplate"},
+		{&ChannelRecommendation{}, "ChannelRecommendation"},
 	}
 	// 动态计算migration数量，确保errChan缓冲区足够大
 	errChan := make(chan error, len(migrations))
@@ -387,6 +402,9 @@ func migrateDBFast() error {
 			return err
 		}
 	}
+	if err := InitializeMonitorQuestions(); err != nil {
+		return err
+	}
 	if err := InitializeUserAuthVersions(); err != nil {
 		return err
 	}
@@ -402,7 +420,34 @@ func migrateDBFast() error {
 			return err
 		}
 	}
+	// Drop the legacy channel_monitor_configs.interval_minutes column, replaced by
+	// interval_seconds. AutoMigrate never drops columns, so old deployments keep it
+	// as dead data until this runs.
+	if err := dropChannelMonitorIntervalMinutes(); err != nil {
+		return err
+	}
 	common.SysLog("database migrated")
+	return nil
+}
+
+// dropChannelMonitorIntervalMinutes removes the obsolete interval_minutes column
+// from channel_monitor_configs. It is idempotent (no-ops when the table or column
+// is already gone). It uses guarded raw SQL because GORM's Migrator.DropColumn
+// silently no-ops for a column absent from the parsed struct schema; the
+// `ALTER TABLE ... DROP COLUMN` form used here is identical across SQLite
+// (>=3.35, shipped by glebarez/modernc), MySQL (>=5.7.8), and PostgreSQL (>=9.6).
+func dropChannelMonitorIntervalMinutes() error {
+	const columnName = "interval_minutes"
+	if !DB.Migrator().HasTable(&ChannelMonitorConfig{}) {
+		return nil
+	}
+	if !DB.Migrator().HasColumn(&ChannelMonitorConfig{}, columnName) {
+		return nil
+	}
+	if err := DB.Exec("ALTER TABLE channel_monitor_configs DROP COLUMN " + columnName).Error; err != nil {
+		return fmt.Errorf("failed to drop channel_monitor_configs.%s: %w", columnName, err)
+	}
+	common.SysLog("dropped legacy channel_monitor_configs.interval_minutes column")
 	return nil
 }
 

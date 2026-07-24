@@ -1,0 +1,10 @@
+{
+  "Anthropic (/v1/messages)": "Anthropic (/v1/messages)",
+  "Embeddings (/v1/embeddings)": "Embeddings (/v1/embeddings)",
+  "Gemini (/v1beta/models/{model}:generateContent)": "Gemini (/v1beta/models/{model}:generateContent)",
+  "Jina Rerank (/v1/rerank)": "Jina Rerank (/v1/rerank)",
+  "Monitoring {{count}} models · {{requests}} total requests": "监控 {{count}} 个模型 · 总请求 {{requests}}",
+  "OpenAI (/v1/chat/completions)": "OpenAI (/v1/chat/completions)",
+  "OpenAI Responses (/v1/responses)": "OpenAI Responses (/v1/responses)",
+  "P{{priority}}": "P{{priority}}"
+}

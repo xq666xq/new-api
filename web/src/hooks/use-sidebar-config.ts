@@ -49,6 +49,7 @@ const DEFAULT_SIDEBAR_MODULES: SidebarModulesAdminConfig = {
     log: true,
     midjourney: true,
     task: true,
+    channelStatus: true,
   },
   personal: {
     enabled: true,
@@ -58,6 +59,7 @@ const DEFAULT_SIDEBAR_MODULES: SidebarModulesAdminConfig = {
   admin: {
     enabled: true,
     channel: true,
+    channelMonitor: true,
     models: true,
     redemption: true,
     user: true,
@@ -107,7 +109,9 @@ const URL_TO_CONFIG_MAP: Record<string, { section: string; module: string }> = {
   '/usage-logs/task': { section: 'console', module: 'task' },
   '/wallet': { section: 'personal', module: 'topup' },
   '/profile': { section: 'personal', module: 'personal' },
+  '/channel-status': { section: 'console', module: 'channelStatus' },
   '/channels': { section: 'admin', module: 'channel' },
+  '/channel-monitor': { section: 'admin', module: 'channelMonitor' },
   '/models': { section: 'admin', module: 'models' },
   '/models/metadata': { section: 'admin', module: 'models' },
   '/models/deployments': { section: 'admin', module: 'models' },

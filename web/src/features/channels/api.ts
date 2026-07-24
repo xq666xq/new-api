@@ -83,7 +83,10 @@ export type CodexCredentialRefreshResponse = {
 export async function getChannels(
   params: GetChannelsParams = {}
 ): Promise<GetChannelsResponse> {
-  const res = await api.get('/api/channel', { params })
+  // Keep the collection URL canonical. Gin registers the collection handler
+  // at /api/channel/; relying on an implicit trailing-slash redirect breaks
+  // when sibling channel-monitor routes are present in the same route tree.
+  const res = await api.get('/api/channel/', { params })
   return res.data
 }
 
@@ -120,7 +123,7 @@ export async function getChannelOps(): Promise<ChannelOpsResponse> {
 export async function createChannel(
   data: AddChannelRequest
 ): Promise<{ success: boolean; message?: string }> {
-  const res = await api.post('/api/channel', data, channelActionConfig())
+  const res = await api.post('/api/channel/', data, channelActionConfig())
   return res.data
 }
 

@@ -148,11 +148,20 @@ type RelayInfo struct {
 	SubscriptionAmountUsedAfterPreConsume int64
 	IsClaudeBetaQuery                     bool // /v1/messages?beta=true
 	IsChannelTest                         bool // channel test request
+	IsChannelMonitor                      bool // scheduled or manual channel monitor probe
 	RetryIndex                            int
 	LastError                             *types.NewAPIError
 	RuntimeHeadersOverride                map[string]interface{}
 	UseRuntimeHeadersOverride             bool
-	ParamOverrideAudit                    []string
+	// MonitorHeadersOverride contains monitor-only request headers. The relay
+	// applies them after provider headers and channel/runtime overrides, and only
+	// when IsChannelMonitor is true, so ordinary forwarding is unaffected.
+	MonitorHeadersOverride map[string]string
+	// MonitorTrace is non-nil only for an administrator-triggered probe. It
+	// captures the real final upstream request/response in memory for the current
+	// HTTP response and is never attached to scheduled probes or normal traffic.
+	MonitorTrace       *MonitorProbeTrace
+	ParamOverrideAudit []string
 
 	// UpstreamRequestBodySize is the byte size of the marshaled upstream request
 	// body. It is set when the body is wrapped in a BodyStorage (see

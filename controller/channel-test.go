@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/relay"
+	relaychannel "github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -39,7 +41,13 @@ type testResult struct {
 	context     *gin.Context
 	localErr    error
 	newAPIError *types.NewAPIError
+	// ttftMs is the streamed time-to-first-token in milliseconds, or 0 when
+	// unavailable (non-stream probe, or failure before the first token). Only the
+	// relay-core probe path populates it, since only it drives a real relay handler.
+	ttftMs int64
 }
+
+const defaultMonitorProbeQuestion = "hi"
 
 func normalizeChannelTestEndpoint(channel *model.Channel, modelName, endpointType string) string {
 	normalized := strings.TrimSpace(endpointType)
@@ -73,6 +81,17 @@ func resolveChannelTestUserID(c *gin.Context) (int, error) {
 }
 
 func testChannel(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool) testResult {
+	return testChannelWithMonitorConfig(ctx, channel, testUserID, testModel, endpointType, isStream, nil, "")
+}
+
+func testChannelWithMonitorConfig(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool, monitorConfig *model.ChannelMonitorConfig, monitorQuestion string) testResult {
+	return testChannelWithMonitorTrace(ctx, channel, testUserID, testModel, endpointType, isStream, monitorConfig, monitorQuestion, nil)
+}
+
+// testChannelWithMonitorTrace runs the same monitor relay path as scheduled
+// probing. A non-nil trace only enables bounded, in-memory capture for the
+// current manual request; it does not alter request assembly or relay behavior.
+func testChannelWithMonitorTrace(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool, monitorConfig *model.ChannelMonitorConfig, monitorQuestion string, monitorTrace *relaycommon.MonitorProbeTrace) testResult {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -230,6 +249,10 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		if strings.HasPrefix(c.Request.URL.Path, "/v1/responses/compact") {
 			relayFormat = types.RelayFormatOpenAIResponsesCompaction
 		}
+	}
+
+	if monitorConfig != nil {
+		return testChannelThroughRelayCore(c, w, testModel, endpointType, channel, isStream, relayFormat, monitorConfig, monitorQuestion, monitorTrace)
 	}
 
 	request := buildTestRequest(testModel, endpointType, channel, isStream)
@@ -516,6 +539,300 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		localErr:    nil,
 		newAPIError: nil,
 	}
+}
+
+// testChannelThroughRelayCore builds a monitor request as if it came from a
+// client, then runs the same format-specific relay handler used by normal
+// forwarding. The monitor flag only suppresses billing/usage side effects in
+// the shared post-consume hooks; ordinary relay requests keep the default path.
+func testChannelThroughRelayCore(c *gin.Context, w *httptest.ResponseRecorder, testModel string, endpointType string, channel *model.Channel, isStream bool, relayFormat types.RelayFormat, monitorConfig *model.ChannelMonitorConfig, monitorQuestion string, monitorTrace *relaycommon.MonitorProbeTrace) testResult {
+	c.Request.URL.Path = strings.ReplaceAll(c.Request.URL.Path, "{model}", testModel)
+	if endpointType == string(constant.EndpointTypeGemini) && isStream {
+		c.Request.URL.Path = strings.Replace(c.Request.URL.Path, ":generateContent", ":streamGenerateContent", 1)
+	}
+
+	request := buildMonitorRequest(testModel, endpointType, channel, isStream)
+	request, err := applyMonitorRequestBody(request, monitorConfig)
+	if err != nil {
+		return testResult{context: c, localErr: err, newAPIError: types.NewError(err, types.ErrorCodeInvalidRequest)}
+	}
+	if err := applyMonitorQuestion(request, monitorQuestion); err != nil {
+		return testResult{context: c, localErr: err, newAPIError: types.NewError(err, types.ErrorCodeInvalidRequest)}
+	}
+	request.SetModelName(testModel)
+
+	body, err := common.Marshal(request)
+	if err != nil {
+		return testResult{context: c, localErr: err, newAPIError: types.NewError(err, types.ErrorCodeJsonMarshalFailed)}
+	}
+	c.Request.Body = io.NopCloser(bytes.NewReader(body))
+	c.Request.ContentLength = int64(len(body))
+	monitorHeaders := applyMonitorRequestHeaders(c.Request, monitorConfig)
+	defer common.CleanupBodyStorage(c)
+
+	parsedRequest, err := helper.GetAndValidateRequest(c, relayFormat)
+	if err != nil {
+		return testResult{context: c, localErr: err, newAPIError: types.NewError(err, types.ErrorCodeInvalidRequest)}
+	}
+
+	info, err := relaycommon.GenRelayInfo(c, relayFormat, parsedRequest, nil)
+	if err != nil {
+		return testResult{
+			context:     c,
+			localErr:    err,
+			newAPIError: types.NewError(err, types.ErrorCodeGenRelayInfoFailed),
+		}
+	}
+	info.IsChannelMonitor = true
+	info.MonitorHeadersOverride = monitorHeaders
+	info.MonitorTrace = monitorTrace
+
+	if err := attachTestBillingRequestInput(info, parsedRequest); err != nil {
+		return testResult{
+			context:     c,
+			localErr:    err,
+			newAPIError: types.NewError(err, types.ErrorCodeJsonMarshalFailed),
+		}
+	}
+
+	meta := parsedRequest.GetTokenCountMeta()
+	tokens, err := service.EstimateRequestToken(c, meta, info)
+	if err != nil {
+		return testResult{context: c, localErr: err, newAPIError: types.NewError(err, types.ErrorCodeCountTokenFailed)}
+	}
+	info.SetEstimatePromptTokens(tokens)
+	if _, err := helper.ModelPriceHelper(c, info, tokens, meta); err != nil {
+		return testResult{
+			context:     c,
+			localErr:    err,
+			newAPIError: types.NewError(err, types.ErrorCodeModelPriceError, types.ErrOptionWithStatusCode(http.StatusBadRequest)),
+		}
+	}
+
+	var relayErr *types.NewAPIError
+	switch relayFormat {
+	case types.RelayFormatClaude:
+		relayErr = relay.ClaudeHelper(c, info)
+	case types.RelayFormatGemini:
+		relayErr = geminiRelayHandler(c, info)
+	default:
+		relayErr = relayHandler(c, info)
+	}
+	if relayErr != nil {
+		return testResult{context: c, localErr: relayErr, newAPIError: relayErr}
+	}
+
+	result := w.Result()
+	respBody, err := readTestResponseBody(result.Body, info.IsStream)
+	if err != nil {
+		return testResult{
+			context:     c,
+			localErr:    err,
+			newAPIError: types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError),
+		}
+	}
+	if bodyErr := validateTestResponseBody(respBody, info.IsStream); bodyErr != nil {
+		return testResult{
+			context:     c,
+			localErr:    bodyErr,
+			newAPIError: types.NewOpenAIError(bodyErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError),
+		}
+	}
+
+	return testResult{context: c, ttftMs: monitorTtftMs(info)}
+}
+
+// monitorTtftMs returns the time-to-first-token in milliseconds for a completed
+// streamed probe, or 0 when it can't be measured (non-stream, or the handler
+// never recorded a first response). Streaming relay handlers call
+// info.SetFirstResponseTime() when the first token arrives, so the delta from
+// StartTime is the TTFT the speed engine ranks on.
+func monitorTtftMs(info *relaycommon.RelayInfo) int64 {
+	if info == nil || !info.HasSendResponse() {
+		return 0
+	}
+	ttft := info.FirstResponseTime.Sub(info.StartTime).Milliseconds()
+	if ttft < 0 {
+		return 0
+	}
+	return ttft
+}
+
+func buildMonitorRequest(modelName string, endpointType string, channel *model.Channel, isStream bool) dto.Request {
+	switch constant.EndpointType(endpointType) {
+	case constant.EndpointTypeAnthropic:
+		maxTokens := uint(16)
+		if strings.Contains(strings.ToLower(modelName), "thinking") {
+			maxTokens = 50
+		}
+		return &dto.ClaudeRequest{
+			Model: modelName,
+			Messages: []dto.ClaudeMessage{{
+				Role:    "user",
+				Content: defaultMonitorProbeQuestion,
+			}},
+			MaxTokens: lo.ToPtr(maxTokens),
+			Stream:    lo.ToPtr(isStream),
+		}
+	case constant.EndpointTypeGemini:
+		maxTokens := uint(3000)
+		return &dto.GeminiChatRequest{
+			Contents: []dto.GeminiChatContent{{
+				Role:  "user",
+				Parts: []dto.GeminiPart{{Text: defaultMonitorProbeQuestion}},
+			}},
+			GenerationConfig: dto.GeminiChatGenerationConfig{MaxOutputTokens: lo.ToPtr(maxTokens)},
+		}
+	default:
+		return buildTestRequest(modelName, endpointType, channel, isStream)
+	}
+}
+
+// setMonitorQuestionContent replaces the last text block while retaining the
+// surrounding client-shaped content. String content remains a string; array
+// content keeps all non-text blocks and metadata intact.
+func setMonitorQuestionContent(content any, question string, blockType string) any {
+	if content == nil {
+		if blockType == "input_text" {
+			return []any{map[string]any{"type": blockType, "text": question}}
+		}
+		return question
+	}
+	if _, ok := content.(string); ok {
+		return question
+	}
+	blocks, ok := content.([]any)
+	if !ok {
+		return question
+	}
+	for index := len(blocks) - 1; index >= 0; index-- {
+		block, ok := blocks[index].(map[string]any)
+		if !ok {
+			continue
+		}
+		kind, _ := block["type"].(string)
+		if kind != "text" && kind != "input_text" {
+			continue
+		}
+		block["text"] = question
+		blocks[index] = block
+		return blocks
+	}
+	return append(blocks, map[string]any{"type": blockType, "text": question})
+}
+
+func setMonitorQuestionInResponsesInput(input json.RawMessage, question string) (json.RawMessage, error) {
+	var decoded any
+	if len(bytes.TrimSpace(input)) == 0 {
+		decoded = []any{}
+	} else if err := common.Unmarshal(input, &decoded); err != nil {
+		return nil, fmt.Errorf("invalid monitor responses input: %w", err)
+	}
+
+	switch value := decoded.(type) {
+	case string:
+		decoded = question
+	case []any:
+		updated := false
+		for index := len(value) - 1; index >= 0; index-- {
+			message, ok := value[index].(map[string]any)
+			if !ok || !strings.EqualFold(common.Interface2String(message["role"]), "user") {
+				continue
+			}
+			message["content"] = setMonitorQuestionContent(message["content"], question, "input_text")
+			value[index] = message
+			updated = true
+			break
+		}
+		if !updated {
+			value = append(value, map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_text", "text": question},
+				},
+			})
+		}
+		decoded = value
+	case nil:
+		decoded = []any{
+			map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_text", "text": question},
+				},
+			},
+		}
+	default:
+		return nil, errors.New("monitor responses input must be a string or array")
+	}
+
+	data, err := common.Marshal(decoded)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(data), nil
+}
+
+// applyMonitorQuestion updates only conversational request types. Non-dialog
+// probes such as embeddings, rerank, and image generation keep their existing
+// endpoint-specific test payloads.
+func applyMonitorQuestion(request dto.Request, question string) error {
+	question = strings.TrimSpace(question)
+	if question == "" {
+		question = defaultMonitorProbeQuestion
+	}
+
+	switch typed := request.(type) {
+	case *dto.GeneralOpenAIRequest:
+		for index := len(typed.Messages) - 1; index >= 0; index-- {
+			if !strings.EqualFold(typed.Messages[index].Role, "user") {
+				continue
+			}
+			typed.Messages[index].Content = setMonitorQuestionContent(typed.Messages[index].Content, question, "text")
+			return nil
+		}
+		typed.Messages = append(typed.Messages, dto.Message{Role: "user", Content: question})
+	case *dto.ClaudeRequest:
+		for index := len(typed.Messages) - 1; index >= 0; index-- {
+			if !strings.EqualFold(typed.Messages[index].Role, "user") {
+				continue
+			}
+			typed.Messages[index].Content = setMonitorQuestionContent(typed.Messages[index].Content, question, "text")
+			return nil
+		}
+		typed.Messages = append(typed.Messages, dto.ClaudeMessage{Role: "user", Content: question})
+	case *dto.GeminiChatRequest:
+		for contentIndex := len(typed.Contents) - 1; contentIndex >= 0; contentIndex-- {
+			if !strings.EqualFold(typed.Contents[contentIndex].Role, "user") {
+				continue
+			}
+			for partIndex := len(typed.Contents[contentIndex].Parts) - 1; partIndex >= 0; partIndex-- {
+				if typed.Contents[contentIndex].Parts[partIndex].Text == "" {
+					continue
+				}
+				typed.Contents[contentIndex].Parts[partIndex].Text = question
+				return nil
+			}
+			typed.Contents[contentIndex].Parts = append(typed.Contents[contentIndex].Parts, dto.GeminiPart{Text: question})
+			return nil
+		}
+		typed.Contents = append(typed.Contents, dto.GeminiChatContent{Role: "user", Parts: []dto.GeminiPart{{Text: question}}})
+	case *dto.OpenAIResponsesRequest:
+		input, err := setMonitorQuestionInResponsesInput(typed.Input, question)
+		if err != nil {
+			return err
+		}
+		typed.Input = input
+	case *dto.OpenAIResponsesCompactionRequest:
+		input, err := setMonitorQuestionInResponsesInput(typed.Input, question)
+		if err != nil {
+			return err
+		}
+		typed.Input = input
+	}
+	return nil
 }
 
 func attachTestBillingRequestInput(info *relaycommon.RelayInfo, request dto.Request) error {
@@ -825,6 +1142,63 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 	return testRequest
 }
 
+func applyMonitorRequestBody(request dto.Request, config *model.ChannelMonitorConfig) (dto.Request, error) {
+	if config == nil || config.BodyMode == "default" || strings.TrimSpace(config.BodyJson) == "" {
+		return request, nil
+	}
+	var custom map[string]interface{}
+	if err := common.UnmarshalJsonStr(config.BodyJson, &custom); err != nil {
+		return nil, fmt.Errorf("invalid monitor request body: %w", err)
+	}
+	merged := custom
+	if config.BodyMode == "merge" {
+		data, err := common.Marshal(request)
+		if err != nil {
+			return nil, err
+		}
+		merged = map[string]interface{}{}
+		if err := common.Unmarshal(data, &merged); err != nil {
+			return nil, err
+		}
+		for key, value := range custom {
+			merged[key] = value
+		}
+	}
+	data, err := common.Marshal(merged)
+	if err != nil {
+		return nil, err
+	}
+	requestType := reflect.TypeOf(request)
+	if requestType == nil || requestType.Kind() != reflect.Ptr {
+		return nil, errors.New("monitor request must be a pointer")
+	}
+	converted, ok := reflect.New(requestType.Elem()).Interface().(dto.Request)
+	if !ok {
+		return nil, fmt.Errorf("unsupported monitor request type: %T", request)
+	}
+	if err := common.Unmarshal(data, converted); err != nil {
+		return nil, err
+	}
+	return converted, nil
+}
+
+func applyMonitorRequestHeaders(request *http.Request, config *model.ChannelMonitorConfig) map[string]string {
+	overrides := map[string]string{}
+	if request == nil || config == nil {
+		return overrides
+	}
+	for _, header := range config.GetHeaders() {
+		key := strings.TrimSpace(header.Key)
+		lowerKey := strings.ToLower(key)
+		if relaychannel.IsMonitorHeaderProtected(lowerKey) {
+			continue
+		}
+		request.Header.Set(key, header.Value)
+		overrides[lowerKey] = header.Value
+	}
+	return overrides
+}
+
 func TestChannel(c *gin.Context) {
 	channelId, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
@@ -923,6 +1297,10 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 			continue
 		}
 		isChannelEnabled := channel.Status == common.ChannelStatusEnabled
+		managedChannel, managedErr := model.IsChannelManaged(channel.Id)
+		if managedErr != nil {
+			common.SysError(fmt.Sprintf("failed to check channel hosting state for channel %d: %v", channel.Id, managedErr))
+		}
 		tik := time.Now()
 		result := testChannel(ctx, channel, testUserID, "", "", shouldUseStreamForAutomaticChannelTest(channel))
 		tok := time.Now()
@@ -956,7 +1334,7 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 		}
 
 		// disable channel
-		if allowDisable && isChannelEnabled && shouldBanChannel && channel.GetAutoBan() {
+		if allowDisable && isChannelEnabled && shouldBanChannel && channel.GetAutoBan() && !managedChannel {
 			processChannelError(result.context, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 			summary.Disabled++
 		}
