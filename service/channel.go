@@ -102,6 +102,17 @@ func ShouldDisableChannel(err *types.NewAPIError) bool {
 	if !common.AutomaticDisableChannelEnabled {
 		return false
 	}
+	return isChannelErrorDisableWorthy(err)
+}
+
+// isChannelErrorDisableWorthy reports whether an error looks like a genuine
+// upstream/channel fault worth acting on (a channel-tagged error, a configured
+// auto-disable status code, or an auto-disable keyword match), independent of the
+// global auto-disable switch. skip-retry errors and nil are never worthy. It is
+// shared by ShouldDisableChannel (which additionally requires the global switch)
+// and by the error-triggered probe path, so both classify "is this a real fault?"
+// identically while gating on their own switch.
+func isChannelErrorDisableWorthy(err *types.NewAPIError) bool {
 	if err == nil {
 		return false
 	}

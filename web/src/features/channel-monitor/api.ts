@@ -477,6 +477,9 @@ type RawPolicy = {
   dingtalk_enabled: boolean
   dingtalk_webhook_url: string
   dingtalk_secret: string
+  error_trigger_probe_enabled: boolean
+  error_probe_threshold: number
+  error_probe_window_seconds: number
 }
 
 function toManagedPolicy(raw: RawPolicy): ManagedPolicySetting {
@@ -490,6 +493,9 @@ function toManagedPolicy(raw: RawPolicy): ManagedPolicySetting {
     dingtalkEnabled: raw.dingtalk_enabled ?? false,
     dingtalkWebhookUrl: raw.dingtalk_webhook_url ?? '',
     dingtalkSecret: raw.dingtalk_secret ?? '',
+    errorTriggerProbeEnabled: raw.error_trigger_probe_enabled ?? false,
+    errorProbeThreshold: raw.error_probe_threshold ?? 2,
+    errorProbeWindowSeconds: raw.error_probe_window_seconds ?? 60,
   }
 }
 
@@ -511,6 +517,9 @@ export async function getManagedPolicy(): Promise<ManagedPolicySetting> {
         dingtalkEnabled: false,
         dingtalkWebhookUrl: '',
         dingtalkSecret: '',
+        errorTriggerProbeEnabled: false,
+        errorProbeThreshold: 2,
+        errorProbeWindowSeconds: 60,
       }
 }
 
@@ -530,6 +539,9 @@ export async function updateManagedPolicy(
       dingtalk_enabled: policy.dingtalkEnabled,
       dingtalk_webhook_url: policy.dingtalkWebhookUrl,
       dingtalk_secret: policy.dingtalkSecret,
+      error_trigger_probe_enabled: policy.errorTriggerProbeEnabled,
+      error_probe_threshold: policy.errorProbeThreshold,
+      error_probe_window_seconds: policy.errorProbeWindowSeconds,
     }
   )
   const raw = res.data?.data

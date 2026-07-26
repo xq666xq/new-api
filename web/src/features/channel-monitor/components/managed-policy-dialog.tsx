@@ -94,6 +94,8 @@ export function ManagedPolicyDialog({
       tierDiffPercent: Math.max(0, draft.tierDiffPercent),
       dingtalkWebhookUrl: draft.dingtalkWebhookUrl.trim(),
       dingtalkSecret: draft.dingtalkSecret.trim(),
+      errorProbeThreshold: Math.max(1, draft.errorProbeThreshold),
+      errorProbeWindowSeconds: Math.max(1, draft.errorProbeWindowSeconds),
     })
   }
 
@@ -188,6 +190,91 @@ export function ManagedPolicyDialog({
                   <p className='text-muted-foreground text-xs'>
                     {t(
                       'Spacing between confirmation probes. Floored at ~15s (the scheduler tick).'
+                    )}
+                  </p>
+                </div>
+              </div>
+            ) : null}
+          </section>
+
+          {/* Error-triggered probe (defer auto-disable to the monitor) */}
+          <section className='space-y-4 rounded-xl border p-4'>
+            <div className='flex items-start justify-between gap-3'>
+              <div className='min-w-0'>
+                <Label className='text-sm font-medium'>
+                  {t('Error-triggered probe')}
+                </Label>
+                <p className='text-muted-foreground mt-1 text-xs'>
+                  {t(
+                    'For managed channels, a forwarding error no longer disables the whole channel. After {{count}} consecutive errors within the window for the same model, the next monitor probe is advanced and the ban/recover decision is left to the policy. A single success resets the streak.',
+                    { count: draft.errorProbeThreshold }
+                  )}
+                </p>
+              </div>
+              <Switch
+                checked={draft.errorTriggerProbeEnabled}
+                onCheckedChange={(v) => patch({ errorTriggerProbeEnabled: v })}
+              />
+            </div>
+            {draft.errorTriggerProbeEnabled ? (
+              <div className='grid gap-4 sm:grid-cols-2'>
+                <div className='grid gap-2'>
+                  <Label htmlFor='policy-error-threshold'>
+                    {t('Error threshold')}
+                  </Label>
+                  <Input
+                    id='policy-error-threshold'
+                    type='number'
+                    min={1}
+                    step={1}
+                    value={draft.errorProbeThreshold}
+                    onChange={(e) =>
+                      patch({
+                        errorProbeThreshold: parseInt2(e.target.value, 1),
+                      })
+                    }
+                    onBlur={() =>
+                      patch({
+                        errorProbeThreshold: Math.max(
+                          1,
+                          draft.errorProbeThreshold
+                        ),
+                      })
+                    }
+                  />
+                  <p className='text-muted-foreground text-xs'>
+                    {t(
+                      'Consecutive errors for the same model before a probe is triggered.'
+                    )}
+                  </p>
+                </div>
+                <div className='grid gap-2'>
+                  <Label htmlFor='policy-error-window'>
+                    {t('Error window (seconds)')}
+                  </Label>
+                  <Input
+                    id='policy-error-window'
+                    type='number'
+                    min={1}
+                    step={1}
+                    value={draft.errorProbeWindowSeconds}
+                    onChange={(e) =>
+                      patch({
+                        errorProbeWindowSeconds: parseInt2(e.target.value, 1),
+                      })
+                    }
+                    onBlur={() =>
+                      patch({
+                        errorProbeWindowSeconds: Math.max(
+                          1,
+                          draft.errorProbeWindowSeconds
+                        ),
+                      })
+                    }
+                  />
+                  <p className='text-muted-foreground text-xs'>
+                    {t(
+                      'The streak resets if this many seconds pass since its first error.'
                     )}
                   </p>
                 </div>

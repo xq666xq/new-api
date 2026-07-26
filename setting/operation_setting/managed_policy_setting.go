@@ -36,6 +36,21 @@ type ManagedPolicySetting struct {
 	DingTalkEnabled    bool   `json:"dingtalk_enabled"`
 	DingTalkWebhookURL string `json:"dingtalk_webhook_url"`
 	DingTalkSecret     string `json:"dingtalk_secret"`
+
+	// Error-triggered probe. When enabled, a genuine upstream fault seen on a
+	// managed channel that monitors the erroring model no longer disables the
+	// whole channel; it only advances that channel's next monitor probe, deferring
+	// the ban/recover decision to the managed policy. This is independent of the
+	// global auto-disable switch and the channel's AutoBan flag — advancing a probe
+	// is not a ban, so it works even when auto-disable is globally off. A probe is
+	// triggered only after ErrorProbeThreshold *consecutive* faults for the same
+	// (channel, model) within ErrorProbeWindowSeconds; a single successful forward
+	// for that pair, or the window elapsing, resets the counter. Non-managed
+	// channels (and any error the probe path declines to own) keep the legacy
+	// auto-disable, still gated by the global switch + AutoBan.
+	ErrorTriggerProbeEnabled bool `json:"error_trigger_probe_enabled"`
+	ErrorProbeThreshold      int  `json:"error_probe_threshold"`
+	ErrorProbeWindowSeconds  int  `json:"error_probe_window_seconds"`
 }
 
 const (
@@ -48,6 +63,15 @@ const (
 	managedDefaultConfirmInterval = 15
 	managedDefaultSpeedWindow     = 5
 	managedDefaultTierDiffPercent = 30
+
+	// Error-triggered probe defaults: two consecutive errors within a 60s window
+	// trigger one probe. The threshold floor is 1 (a single error) and the window
+	// floor is 1s so a hand-edited config can never disable counting by setting a
+	// non-positive value.
+	managedDefaultErrorProbeThreshold = 2
+	managedDefaultErrorProbeWindow    = 60
+	managedErrorProbeThresholdFloor   = 1
+	managedErrorProbeWindowFloor      = 1
 )
 
 // 默认配置：两个开关默认关闭，参数取安全默认值。
@@ -58,6 +82,9 @@ var managedPolicySetting = ManagedPolicySetting{
 	SpeedEnabled:              false,
 	SpeedWindow:               managedDefaultSpeedWindow,
 	TierDiffPercent:           managedDefaultTierDiffPercent,
+	ErrorTriggerProbeEnabled:  false,
+	ErrorProbeThreshold:       managedDefaultErrorProbeThreshold,
+	ErrorProbeWindowSeconds:   managedDefaultErrorProbeWindow,
 }
 
 func init() {
@@ -79,6 +106,12 @@ func GetManagedPolicySetting() *ManagedPolicySetting {
 	}
 	if managedPolicySetting.TierDiffPercent < 0 {
 		managedPolicySetting.TierDiffPercent = managedDefaultTierDiffPercent
+	}
+	if managedPolicySetting.ErrorProbeThreshold < managedErrorProbeThresholdFloor {
+		managedPolicySetting.ErrorProbeThreshold = managedDefaultErrorProbeThreshold
+	}
+	if managedPolicySetting.ErrorProbeWindowSeconds < managedErrorProbeWindowFloor {
+		managedPolicySetting.ErrorProbeWindowSeconds = managedDefaultErrorProbeWindow
 	}
 	return &managedPolicySetting
 }

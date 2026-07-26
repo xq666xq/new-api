@@ -584,6 +584,12 @@
     "Balance updated: {{balance}}": "Solde mis à jour : {{balance}}",
     "Ban / recover and speed policy switches": "Options de blocage/rétablissement et de vitesse",
     "Ban and recover": "Blocage et rétablissement",
+    "Error-triggered probe": "Sonde déclenchée par erreur",
+    "For managed channels, a forwarding error no longer disables the whole channel. After {{count}} consecutive errors within the window for the same model, the next monitor probe is advanced and the ban/recover decision is left to the policy. A single success resets the streak.": "Pour les canaux gérés, une erreur de transfert ne désactive plus tout le canal. Après {{count}} erreurs consécutives dans la fenêtre pour le même modèle, la prochaine sonde de surveillance est avancée et la décision de bannissement/récupération est laissée à la politique. Un seul succès réinitialise la série.",
+    "Error threshold": "Seuil d'erreur",
+    "Consecutive errors for the same model before a probe is triggered.": "Erreurs consécutives pour le même modèle avant le déclenchement d'une sonde.",
+    "Error window (seconds)": "Fenêtre d'erreur (secondes)",
+    "The streak resets if this many seconds pass since its first error.": "La série est réinitialisée si ce nombre de secondes s'écoule depuis sa première erreur.",
     "banned": "bloqué",
     "Banned": "Bloqué",
     "Bar Chart": "Graphique en barres",
@@ -5437,7 +5443,7 @@
     "The secret shown when the robot uses the \"signed\" security setting. Leave empty for keyword or IP-based robots.": "机器人使用「加签」安全设置时显示的密钥。若使用关键词或 IP 白名单方式可留空。",
     "Enter a valid DingTalk webhook URL (must start with https://)": "请输入有效的钉钉 Webhook 地址（需以 https:// 开头）",
     "Probe timeout (seconds)": "Probe timeout (seconds)",
-    "A probe exceeding this is cancelled and marked failed. Does not affect real forwarding.": "A probe exceeding this is cancelled and marked failed. Does not affect real forwarding.",
+    "A probe exceeding this is cancelled and recorded as a failure. Independent of the relay timeout, so it never shortens real forwarding.": "A probe exceeding this is cancelled and recorded as a failure. Independent of the relay timeout, so it never shortens real forwarding.",
     "Enter a whole number between {{min}} and {{max}}.": "Enter a whole number between {{min}} and {{max}}."
   }
 }

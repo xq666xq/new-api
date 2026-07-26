@@ -19,7 +19,6 @@ For commercial licensing, please contact support@quantumnous.com
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   BookOpenText,
-  FastForward,
   LayoutTemplate,
   MoonStar,
   PlayCircle,

@@ -584,6 +584,12 @@
     "Balance updated: {{balance}}": "残高更新：{{balance}}",
     "Ban / recover and speed policy switches": "無効化／復旧と速度ポリシーのスイッチ",
     "Ban and recover": "無効化と復旧",
+    "Error-triggered probe": "エラー起動プローブ",
+    "For managed channels, a forwarding error no longer disables the whole channel. After {{count}} consecutive errors within the window for the same model, the next monitor probe is advanced and the ban/recover decision is left to the policy. A single success resets the streak.": "マネージドチャネルでは、転送エラーによってチャネル全体が無効化されることはなくなりました。同一モデルでウィンドウ内に {{count}} 回連続してエラーが発生すると、次回の監視プローブが前倒しされ、禁止/復旧の判断はポリシーに委ねられます。1 回でも成功すると連続カウントはリセットされます。",
+    "Error threshold": "エラーしきい値",
+    "Consecutive errors for the same model before a probe is triggered.": "プローブが起動されるまでの同一モデルでの連続エラー回数。",
+    "Error window (seconds)": "エラーウィンドウ（秒）",
+    "The streak resets if this many seconds pass since its first error.": "最初のエラーからこの秒数が経過すると、連続カウントはリセットされます。",
     "banned": "無効",
     "Banned": "無効",
     "Bar Chart": "棒グラフ",
@@ -5437,7 +5443,7 @@
     "The secret shown when the robot uses the \"signed\" security setting. Leave empty for keyword or IP-based robots.": "机器人使用「加签」安全设置时显示的密钥。若使用关键词或 IP 白名单方式可留空。",
     "Enter a valid DingTalk webhook URL (must start with https://)": "请输入有效的钉钉 Webhook 地址（需以 https:// 开头）",
     "Probe timeout (seconds)": "Probe timeout (seconds)",
-    "A probe exceeding this is cancelled and marked failed. Does not affect real forwarding.": "A probe exceeding this is cancelled and marked failed. Does not affect real forwarding.",
+    "A probe exceeding this is cancelled and recorded as a failure. Independent of the relay timeout, so it never shortens real forwarding.": "A probe exceeding this is cancelled and recorded as a failure. Independent of the relay timeout, so it never shortens real forwarding.",
     "Enter a whole number between {{min}} and {{max}}.": "Enter a whole number between {{min}} and {{max}}."
   }
 }

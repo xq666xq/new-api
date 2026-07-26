@@ -816,6 +816,9 @@ type managedPolicyUpdateRequest struct {
 	DingTalkEnabled           bool   `json:"dingtalk_enabled"`
 	DingTalkWebhookURL        string `json:"dingtalk_webhook_url"`
 	DingTalkSecret            string `json:"dingtalk_secret"`
+	ErrorTriggerProbeEnabled  bool   `json:"error_trigger_probe_enabled"`
+	ErrorProbeThreshold       int    `json:"error_probe_threshold"`
+	ErrorProbeWindowSeconds   int    `json:"error_probe_window_seconds"`
 }
 
 // UpdateManagedPolicySetting validates and persists the channel-managed policy.
@@ -839,6 +842,12 @@ func UpdateManagedPolicySetting(c *gin.Context) {
 	}
 	if req.TierDiffPercent < 0 {
 		req.TierDiffPercent = 0
+	}
+	if req.ErrorProbeThreshold < 1 {
+		req.ErrorProbeThreshold = 1
+	}
+	if req.ErrorProbeWindowSeconds < 1 {
+		req.ErrorProbeWindowSeconds = 1
 	}
 	// DingTalk fields: trim and, when enabled, require a plausible https webhook so
 	// a typo can't silently disable alerts. An empty/invalid URL with the switch on
@@ -864,6 +873,9 @@ func UpdateManagedPolicySetting(c *gin.Context) {
 		"managed_policy_setting.dingtalk_enabled":             strconv.FormatBool(req.DingTalkEnabled),
 		"managed_policy_setting.dingtalk_webhook_url":         req.DingTalkWebhookURL,
 		"managed_policy_setting.dingtalk_secret":              req.DingTalkSecret,
+		"managed_policy_setting.error_trigger_probe_enabled":  strconv.FormatBool(req.ErrorTriggerProbeEnabled),
+		"managed_policy_setting.error_probe_threshold":        strconv.Itoa(req.ErrorProbeThreshold),
+		"managed_policy_setting.error_probe_window_seconds":   strconv.Itoa(req.ErrorProbeWindowSeconds),
 	}
 	if err := model.UpdateOptionsBulk(values); err != nil {
 		common.ApiError(c, err)

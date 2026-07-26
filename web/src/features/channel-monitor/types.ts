@@ -172,6 +172,12 @@ export interface ManagedPolicySetting {
   dingtalkWebhookUrl: string
   /** Optional DingTalk signing secret ("加签"); blank when unused. */
   dingtalkSecret: string
+  /** Master switch: defer a managed channel's auto-disable to a monitor probe. */
+  errorTriggerProbeEnabled: boolean
+  /** Consecutive forwarding errors (per channel+model) that trigger a probe. */
+  errorProbeThreshold: number
+  /** Window in seconds within which the error streak must accumulate. */
+  errorProbeWindowSeconds: number
 }
 
 /**
