@@ -1297,10 +1297,6 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 			continue
 		}
 		isChannelEnabled := channel.Status == common.ChannelStatusEnabled
-		managedChannel, managedErr := model.IsChannelManaged(channel.Id)
-		if managedErr != nil {
-			common.SysError(fmt.Sprintf("failed to check channel hosting state for channel %d: %v", channel.Id, managedErr))
-		}
 		tik := time.Now()
 		result := testChannel(ctx, channel, testUserID, "", "", shouldUseStreamForAutomaticChannelTest(channel))
 		tok := time.Now()
@@ -1334,7 +1330,7 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 		}
 
 		// disable channel
-		if allowDisable && isChannelEnabled && shouldBanChannel && channel.GetAutoBan() && !managedChannel {
+		if allowDisable && isChannelEnabled && shouldBanChannel && channel.GetAutoBan() {
 			processChannelError(result.context, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 			summary.Disabled++
 		}
