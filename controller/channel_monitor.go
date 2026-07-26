@@ -240,6 +240,60 @@ func ProbeChannelMonitorNow(c *gin.Context) {
 	common.ApiSuccess(c, results)
 }
 
+type triggerChannelMonitorRequest struct {
+	ChannelId int `json:"channel_id"`
+}
+
+// TriggerChannelMonitorNow brings a channel's next scheduled probe forward so the
+// monitor scheduler runs it on its next tick. Unlike ProbeChannelMonitorNow (an
+// out-of-band diagnostic that never touches scheduling or policy), this simply
+// makes the config immediately due, so the resulting sweep is a normal scheduled
+// run: results are tagged scheduled and drive managed ban/recover and speed
+// policy exactly as the regular cadence would. It requires monitoring to be
+// enabled, not in curfew, and the channel's monitor config to be enabled.
+func TriggerChannelMonitorNow(c *gin.Context) {
+	var request triggerChannelMonitorRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if request.ChannelId <= 0 {
+		common.ApiErrorMsg(c, "缺少有效的渠道 ID")
+		return
+	}
+	if !operation_setting.IsChannelMonitorEnabled() {
+		common.ApiErrorMsg(c, "监控总开关已关闭，无法触发探测")
+		return
+	}
+	if operation_setting.IsChannelMonitorCurfewActive(time.Now()) {
+		common.ApiErrorMsg(c, "当前处于宵禁时间，暂停探测")
+		return
+	}
+	config, err := model.GetChannelMonitorConfig(request.ChannelId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if config == nil {
+		common.ApiErrorMsg(c, "该渠道尚未配置监控")
+		return
+	}
+	if !config.Enabled {
+		common.ApiErrorMsg(c, "该渠道监控未开启")
+		return
+	}
+	affected, err := model.AdvanceChannelMonitorConfigDue(request.ChannelId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if affected == 0 {
+		common.ApiErrorMsg(c, "该渠道监控未开启")
+		return
+	}
+	common.ApiSuccess(c, nil)
+}
+
 // validMonitorBodyModes 限定请求体处理模式的合法取值。
 var validMonitorBodyModes = map[string]bool{
 	"default":  true,
@@ -660,19 +714,82 @@ func GetChannelMonitorSetting(c *gin.Context) {
 
 type channelMonitorSettingUpdateRequest struct {
 	Enabled *bool `json:"enabled" binding:"required"`
+	// Curfew is an optional daily quiet window; all three fields are optional and
+	// only applied when present, so an old client sending just `enabled` keeps the
+	// existing curfew config untouched.
+	CurfewEnabled *bool   `json:"curfew_enabled"`
+	CurfewStart   *string `json:"curfew_start"`
+	CurfewEnd     *string `json:"curfew_end"`
+	// ProbeTimeoutSeconds bounds a single probe; optional so an old client omitting
+	// it keeps the stored value. Clamped to the setting's safe range before saving.
+	ProbeTimeoutSeconds *int `json:"probe_timeout_seconds"`
+}
+
+// validCurfewTime reports whether a string is a well-formed 24-hour "HH:MM" time,
+// the format the scheduler parses to decide the quiet window.
+func validCurfewTime(value string) bool {
+	_, err := time.Parse("15:04", value)
+	return err == nil
 }
 
 // UpdateChannelMonitorSetting persists the global monitor scheduler switch and
-// updates the live setting through the standard option pipeline.
+// optional curfew window, updating the live setting through the standard option
+// pipeline.
 func UpdateChannelMonitorSetting(c *gin.Context) {
 	var req channelMonitorSettingUpdateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	if err := model.UpdateOptionsBulk(map[string]string{
+	values := map[string]string{
 		"channel_monitor_setting.enabled": strconv.FormatBool(*req.Enabled),
-	}); err != nil {
+	}
+	// Seed the curfew fields from the live setting so a partial update never wipes
+	// the other curfew fields.
+	current := operation_setting.GetChannelMonitorSetting()
+	curfewEnabled := current.CurfewEnabled
+	curfewStart := current.CurfewStart
+	curfewEnd := current.CurfewEnd
+	if req.CurfewEnabled != nil {
+		curfewEnabled = *req.CurfewEnabled
+	}
+	if req.CurfewStart != nil {
+		curfewStart = strings.TrimSpace(*req.CurfewStart)
+	}
+	if req.CurfewEnd != nil {
+		curfewEnd = strings.TrimSpace(*req.CurfewEnd)
+	}
+	// When curfew is on, both bounds must be valid HH:MM and describe a non-empty
+	// window; an equal start/end has no meaningful duration and is rejected so the
+	// switch can't silently do nothing.
+	if curfewEnabled {
+		if !validCurfewTime(curfewStart) || !validCurfewTime(curfewEnd) {
+			common.ApiErrorMsg(c, "宵禁时间格式无效，需为 HH:MM")
+			return
+		}
+		if curfewStart == curfewEnd {
+			common.ApiErrorMsg(c, "宵禁开始与结束时间不能相同")
+			return
+		}
+	}
+	values["channel_monitor_setting.curfew_enabled"] = strconv.FormatBool(curfewEnabled)
+	values["channel_monitor_setting.curfew_start"] = curfewStart
+	values["channel_monitor_setting.curfew_end"] = curfewEnd
+	// Seed the probe timeout from the live value, then clamp any provided override
+	// to the setting's safe range so a hand-edited or out-of-range value can't
+	// disable the timeout or set an absurd one.
+	probeTimeout := current.ProbeTimeoutSeconds
+	if req.ProbeTimeoutSeconds != nil {
+		probeTimeout = *req.ProbeTimeoutSeconds
+	}
+	if probeTimeout < operation_setting.MonitorProbeTimeoutMinSeconds {
+		probeTimeout = operation_setting.MonitorProbeTimeoutMinSeconds
+	}
+	if probeTimeout > operation_setting.MonitorProbeTimeoutMaxSeconds {
+		probeTimeout = operation_setting.MonitorProbeTimeoutMaxSeconds
+	}
+	values["channel_monitor_setting.probe_timeout_seconds"] = strconv.Itoa(probeTimeout)
+	if err := model.UpdateOptionsBulk(values); err != nil {
 		common.ApiError(c, err)
 		return
 	}

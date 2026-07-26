@@ -39,6 +39,11 @@ func (channelMonitorHandler) Enabled() bool {
 	if !operation_setting.IsChannelMonitorEnabled() {
 		return false
 	}
+	// Curfew pauses all probing: skip scheduling entirely while it is active so
+	// no channel_monitor row is created during the quiet window.
+	if operation_setting.IsChannelMonitorCurfewActive(time.Now()) {
+		return false
+	}
 	return model.HasDueChannelMonitorConfigs(common.GetTimestamp())
 }
 
@@ -91,11 +96,22 @@ func executeChannelMonitorProbe(
 	if endpointType == "auto" {
 		endpointType = ""
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	stream := config.Stream || config.Managed
 	result := testResult{localErr: channelLoadErr}
 	if channelLoadErr == nil && channel != nil {
+		// Bound each probe with an independent timeout so a hung or very slow
+		// upstream is cancelled and recorded as a failure instead of stalling the
+		// serial sweep for minutes. This is separate from RELAY_TIMEOUT so probe
+		// health checks can be tightened without shortening real forwarding. The
+		// child context is derived from the caller's, so scheduler cancellation
+		// (task stop) and the manual request context still apply.
+		probeCtx, cancel := context.WithTimeout(ctx, operation_setting.GetChannelMonitorProbeTimeout())
+		defer cancel()
 		result = testChannelWithMonitorTrace(
-			ctx,
+			probeCtx,
 			channel,
 			testUserID,
 			modelName,
@@ -182,6 +198,11 @@ func nextChannelMonitorCheckAt(
 func runChannelMonitorTask(ctx context.Context) (channelMonitorTaskResult, error) {
 	summary := channelMonitorTaskResult{}
 	if !operation_setting.IsChannelMonitorEnabled() {
+		return summary, nil
+	}
+	// Curfew pauses all probing. Checked here too (not just in Enabled) because a
+	// task row may already have been leased when the quiet window began.
+	if operation_setting.IsChannelMonitorCurfewActive(time.Now()) {
 		return summary, nil
 	}
 	now := common.GetTimestamp()

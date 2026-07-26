@@ -6,5 +6,7 @@
   "Monitoring {{count}} models · {{requests}} total requests": "监控 {{count}} 个模型 · 总请求 {{requests}}",
   "OpenAI (/v1/chat/completions)": "OpenAI (/v1/chat/completions)",
   "OpenAI Responses (/v1/responses)": "OpenAI Responses (/v1/responses)",
-  "P{{priority}}": "P{{priority}}"
+  "P{{priority}}": "P{{priority}}",
+  "The custom robot webhook, must start with https://. Required when enabled.": "自定义机器人的 Webhook 地址，需以 https:// 开头。启用时必填。",
+  "Enter a valid DingTalk webhook URL (must start with https://)": "请输入有效的钉钉 Webhook 地址（需以 https:// 开头）"
 }

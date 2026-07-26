@@ -145,9 +145,63 @@ type ChannelStatusRow struct {
 	// the most recent probe (by CheckedAt) for this channel+model pair, both in
 	// milliseconds and 0 when unavailable (no probe, or a non-stream probe for
 	// TTFT). The card surfaces them so operators can eyeball the latest speed.
-	LastTtftMs    int64                `json:"last_ttft_ms"`
-	LastLatencyMs int64                `json:"last_latency_ms"`
+	LastTtftMs    int64 `json:"last_ttft_ms"`
+	LastLatencyMs int64 `json:"last_latency_ms"`
+	// ModelEnabled / ModelPriority are this channel+model pair's current routing
+	// state, read from the abilities table: whether the model is enabled on this
+	// channel (a disabled channel or a policy ban leaves it false) and the priority
+	// used to order it during selection. They describe routing, not probe health,
+	// so a healthy sparkline can still show a disabled model (e.g. banned by policy)
+	// and vice versa. Only populated in the admin channel view; the aggregated
+	// member view leaves them zero-valued since it hides channel identity.
+	ModelEnabled  bool                 `json:"model_enabled"`
+	ModelPriority int64                `json:"model_priority"`
 	RecentChecks  []ChannelStatusCheck `json:"recent_checks"`
+}
+
+// channelModelAbilityStatus is one (channel, model) pair's routing state derived
+// from the abilities table.
+type channelModelAbilityStatus struct {
+	Enabled  bool
+	Priority int64
+}
+
+// getChannelModelAbilityStatuses batch-loads the routing state for the given
+// channel+model pairs from the abilities table, keyed "channelId\x00model". A
+// pair spans one ability row per group; they share a priority and normally share
+// an enabled flag, so the pair is reported enabled when any row is enabled and
+// takes the highest priority seen. Pairs with no ability row are simply absent
+// from the map (caller treats them as disabled with zero priority).
+func getChannelModelAbilityStatuses(channelIds []int, modelNames []string) (map[string]channelModelAbilityStatus, error) {
+	statuses := make(map[string]channelModelAbilityStatus)
+	if len(channelIds) == 0 || len(modelNames) == 0 {
+		return statuses, nil
+	}
+	var abilities []Ability
+	if err := DB.Model(&Ability{}).
+		Select("channel_id", "model", "enabled", "priority").
+		Where("channel_id IN ? AND model IN ?", channelIds, modelNames).
+		Find(&abilities).Error; err != nil {
+		return nil, err
+	}
+	for _, ability := range abilities {
+		key := fmt.Sprintf("%d\x00%s", ability.ChannelId, ability.Model)
+		priority := int64(0)
+		if ability.Priority != nil {
+			priority = *ability.Priority
+		}
+		existing, ok := statuses[key]
+		if !ok {
+			statuses[key] = channelModelAbilityStatus{Enabled: ability.Enabled, Priority: priority}
+			continue
+		}
+		existing.Enabled = existing.Enabled || ability.Enabled
+		if priority > existing.Priority {
+			existing.Priority = priority
+		}
+		statuses[key] = existing
+	}
+	return statuses, nil
 }
 
 const (
@@ -388,6 +442,15 @@ func GetChannelStatusRows(rangeKey string, now time.Time) ([]ChannelStatusRow, e
 			row.Requests += stat.Total
 		}
 	}
+	// Per-model routing state (enabled + priority) from the abilities table, so the
+	// admin card can show each model's current status/priority next to its health.
+	// Best-effort: a lookup error just leaves the fields zero-valued rather than
+	// blanking the whole page.
+	abilityStatuses, abilityErr := getChannelModelAbilityStatuses(channelIds, modelNames)
+	if abilityErr != nil {
+		common.SysError("channel status: failed to load ability routing state: " + abilityErr.Error())
+		abilityStatuses = map[string]channelModelAbilityStatus{}
+	}
 	for i := range rows {
 		success := 0
 		for j := range rows[i].RecentChecks {
@@ -401,6 +464,10 @@ func GetChannelStatusRows(rangeKey string, now time.Time) ([]ChannelStatusRow, e
 		}
 		if probeCount[i] > 0 {
 			rows[i].AvgResponseMs = int(totalLatency[i] / int64(probeCount[i]))
+		}
+		if status, ok := abilityStatuses[fmt.Sprintf("%d\x00%s", rows[i].ChannelId, rows[i].Model)]; ok {
+			rows[i].ModelEnabled = status.Enabled
+			rows[i].ModelPriority = status.Priority
 		}
 	}
 	// Order by operator recommendation weight (descending) so the channels an
@@ -570,6 +637,22 @@ func UpdateChannelMonitorSchedule(channelId int, checkedAt int64, nextCheckAt in
 			"next_check_at":   nextCheckAt,
 			"updated_time":    checkedAt,
 		}).Error
+}
+
+// AdvanceChannelMonitorConfigDue brings one enabled channel's next probe forward
+// so the scheduler picks it up on its next tick and runs a full scheduled sweep
+// (including managed-policy follow-up) for it. Setting next_check_at to 0 makes
+// the config immediately due (GetDueChannelMonitorConfigs matches next_check_at
+// <= now). It only affects an enabled config; a disabled or missing config
+// reports rows affected 0 so the caller can surface an accurate message.
+func AdvanceChannelMonitorConfigDue(channelId int) (int64, error) {
+	result := DB.Model(&ChannelMonitorConfig{}).
+		Where("channel_id = ? AND enabled = ?", channelId, true).
+		Updates(map[string]interface{}{
+			"next_check_at": 0,
+			"updated_time":  common.GetTimestamp(),
+		})
+	return result.RowsAffected, result.Error
 }
 
 const (

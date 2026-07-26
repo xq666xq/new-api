@@ -308,23 +308,64 @@ export async function saveChannelMonitorConfig(
   return toMonitorConfig(res.data?.data ?? null)
 }
 
-/** Fetch the global switch that gates scheduled probes and managed policy runs. */
-export async function getChannelMonitorSetting(): Promise<ChannelMonitorSetting> {
-  const res = await api.get<ApiResponse<ChannelMonitorSetting>>(
-    '/api/channel_monitor/settings'
-  )
-  return res.data?.data ?? { enabled: true }
+type RawMonitorSetting = {
+  enabled: boolean
+  curfew_enabled: boolean
+  curfew_start: string
+  curfew_end: string
+  probe_timeout_seconds: number
 }
 
-/** Update the global monitor switch without changing channel configs or history. */
-export async function updateChannelMonitorSetting(
-  enabled: boolean
-): Promise<ChannelMonitorSetting> {
-  const res = await api.put<ApiResponse<ChannelMonitorSetting>>(
-    '/api/channel_monitor/settings',
-    { enabled }
+function toMonitorSetting(raw: RawMonitorSetting | null): ChannelMonitorSetting {
+  return {
+    enabled: raw?.enabled ?? true,
+    curfewEnabled: raw?.curfew_enabled ?? false,
+    curfewStart: raw?.curfew_start || '23:00',
+    curfewEnd: raw?.curfew_end || '07:00',
+    probeTimeoutSeconds: raw?.probe_timeout_seconds || 60,
+  }
+}
+
+/** Fetch the global switch that gates scheduled probes and managed policy runs. */
+export async function getChannelMonitorSetting(): Promise<ChannelMonitorSetting> {
+  const res = await api.get<ApiResponse<RawMonitorSetting>>(
+    '/api/channel_monitor/settings'
   )
-  return res.data?.data ?? { enabled }
+  return toMonitorSetting(res.data?.data ?? null)
+}
+
+/** Update the global monitor switch + curfew without touching channel configs. */
+export async function updateChannelMonitorSetting(
+  setting: ChannelMonitorSetting
+): Promise<ChannelMonitorSetting> {
+  const res = await api.put<ApiResponse<RawMonitorSetting>>(
+    '/api/channel_monitor/settings',
+    {
+      enabled: setting.enabled,
+      curfew_enabled: setting.curfewEnabled,
+      curfew_start: setting.curfewStart,
+      curfew_end: setting.curfewEnd,
+      probe_timeout_seconds: setting.probeTimeoutSeconds,
+    }
+  )
+  return toMonitorSetting(res.data?.data ?? null)
+}
+
+/**
+ * Bring one channel's next scheduled monitor probe forward so the scheduler runs
+ * it on its next tick as a normal scheduled sweep (feeding managed policy). This
+ * is distinct from runChannelMonitorProbe, which is a one-off in-request diagnostic.
+ */
+export async function triggerChannelMonitorNow(
+  channelId: number
+): Promise<void> {
+  const res = await api.post<ApiResponse<null>>(
+    '/api/channel_monitor/trigger',
+    { channel_id: channelId }
+  )
+  if (!res.data?.success) {
+    throw new Error(res.data?.message || 'trigger monitor failed')
+  }
 }
 
 /** Run one channel model with the configured probe strategy and return its trace. */

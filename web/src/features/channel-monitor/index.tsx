@@ -19,19 +19,29 @@ For commercial licensing, please contact support@quantumnous.com
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   BookOpenText,
+  FastForward,
   LayoutTemplate,
+  MoonStar,
+  PlayCircle,
   Settings2,
   ShieldCheck,
   Star,
   Zap,
 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { SectionPageLayout } from '@/components/layout'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover'
 import { Switch } from '@/components/ui/switch'
 import {
   Table,
@@ -63,6 +73,7 @@ import {
   runChannelMonitorProbe,
   saveChannelMonitorConfig,
   saveChannelRecommendations,
+  triggerChannelMonitorNow,
   updateChannelMonitorSetting,
   updateManagedPolicy,
   updateMonitorQuestion,
@@ -78,6 +89,7 @@ import { channelMonitorColumns, channelMonitorTableClassName } from './layout'
 import { canRunManualProbe, getManualProbeModels } from './probe-availability'
 import type {
   ChannelMonitorRow,
+  ChannelMonitorSetting,
   ChannelRecommendationRow,
   ManagedPolicySetting,
   MonitorConfig,
@@ -236,6 +248,196 @@ const MONITOR_TEMPLATES_KEY = ['channel-monitor', 'templates']
 const MONITOR_POLICY_KEY = ['channel-monitor', 'managed-policy']
 const MONITOR_RECOMMENDATIONS_KEY = ['channel-monitor', 'recommendations']
 
+/** Basic "HH:MM" 24-hour validation used to gate the curfew save button. */
+function isValidClock(value: string): boolean {
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(value)
+}
+
+// Probe timeout bounds, mirroring the backend clamp (operation_setting). The UI
+// validates against these so an out-of-range value is caught before the request.
+const MONITOR_PROBE_TIMEOUT_MIN = 5
+const MONITOR_PROBE_TIMEOUT_MAX = 600
+
+/**
+ * Curfew control: a popover holding the daily quiet-window switch and its
+ * start/end time inputs. Placed right after the master switch. While curfew is
+ * active no channel/model is probed at all; the window wraps past midnight when
+ * start is later than end (e.g. 23:00 → 07:00). Local edits are staged and only
+ * pushed on "Save" so a half-typed time never triggers a probe pause.
+ */
+function CurfewControl({
+  setting,
+  disabled,
+  saving,
+  onSave,
+}: {
+  setting: ChannelMonitorSetting
+  disabled: boolean
+  saving: boolean
+  onSave: (next: ChannelMonitorSetting) => void
+}) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  const [enabled, setEnabled] = useState(setting.curfewEnabled)
+  const [start, setStart] = useState(setting.curfewStart)
+  const [end, setEnd] = useState(setting.curfewEnd)
+  // Probe timeout is edited as a string so an in-progress edit (empty field) is
+  // allowed; it is parsed and range-checked before the save button enables.
+  const [timeout, setTimeout] = useState(String(setting.probeTimeoutSeconds))
+
+  // Re-sync the staged draft with the server value whenever the popover opens or
+  // the persisted setting changes, so a discarded edit does not linger.
+  useEffect(() => {
+    if (open) {
+      setEnabled(setting.curfewEnabled)
+      setStart(setting.curfewStart)
+      setEnd(setting.curfewEnd)
+      setTimeout(String(setting.probeTimeoutSeconds))
+    }
+  }, [
+    open,
+    setting.curfewEnabled,
+    setting.curfewStart,
+    setting.curfewEnd,
+    setting.probeTimeoutSeconds,
+  ])
+
+  const timesValid = isValidClock(start) && isValidClock(end)
+  const timeoutValue = Number(timeout)
+  const timeoutValid =
+    Number.isInteger(timeoutValue) &&
+    timeoutValue >= MONITOR_PROBE_TIMEOUT_MIN &&
+    timeoutValue <= MONITOR_PROBE_TIMEOUT_MAX
+  const canSave = timesValid && timeoutValid && !saving
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger
+        render={
+          <Button
+            type='button'
+            variant='outline'
+            size='sm'
+            disabled={disabled}
+          />
+        }
+      >
+        <MoonStar data-icon='inline-start' className='size-3.5' />
+        {setting.curfewEnabled
+          ? t('Curfew {{start}}–{{end}}', {
+              start: setting.curfewStart,
+              end: setting.curfewEnd,
+            })
+          : t('Curfew')}
+      </PopoverTrigger>
+      <PopoverContent align='start' className='w-80 space-y-4 p-4'>
+        <div className='space-y-1'>
+          <div className='text-sm font-medium'>{t('Monitoring curfew')}</div>
+          <p className='text-muted-foreground text-xs'>
+            {t(
+              'While active, no channel or model is probed. The window wraps past midnight when the start is later than the end.'
+            )}
+          </p>
+        </div>
+        <div className='flex items-center justify-between gap-3'>
+          <Label htmlFor='curfew-enabled' className='text-sm'>
+            {t('Enable curfew')}
+          </Label>
+          <Switch
+            id='curfew-enabled'
+            checked={enabled}
+            onCheckedChange={setEnabled}
+          />
+        </div>
+        <div className='grid grid-cols-2 gap-3'>
+          <div className='space-y-1.5'>
+            <Label htmlFor='curfew-start' className='text-xs'>
+              {t('Start Time')}
+            </Label>
+            <Input
+              id='curfew-start'
+              type='time'
+              value={start}
+              disabled={!enabled}
+              onChange={(e) => setStart(e.target.value)}
+            />
+          </div>
+          <div className='space-y-1.5'>
+            <Label htmlFor='curfew-end' className='text-xs'>
+              {t('End Time')}
+            </Label>
+            <Input
+              id='curfew-end'
+              type='time'
+              value={end}
+              disabled={!enabled}
+              onChange={(e) => setEnd(e.target.value)}
+            />
+          </div>
+        </div>
+        {enabled && !timesValid && (
+          <p className='text-destructive text-xs'>
+            {t('Enter valid times in HH:MM format.')}
+          </p>
+        )}
+        <div className='space-y-1.5 border-t pt-4'>
+          <Label htmlFor='probe-timeout' className='text-sm'>
+            {t('Probe timeout (seconds)')}
+          </Label>
+          <Input
+            id='probe-timeout'
+            type='number'
+            min={MONITOR_PROBE_TIMEOUT_MIN}
+            max={MONITOR_PROBE_TIMEOUT_MAX}
+            value={timeout}
+            onChange={(e) => setTimeout(e.target.value)}
+          />
+          <p className='text-muted-foreground text-xs'>
+            {t(
+              'A probe exceeding this is cancelled and recorded as a failure. Independent of the relay timeout, so it never shortens real forwarding.'
+            )}
+          </p>
+          {!timeoutValid && (
+            <p className='text-destructive text-xs'>
+              {t('Enter a whole number between {{min}} and {{max}}.', {
+                min: MONITOR_PROBE_TIMEOUT_MIN,
+                max: MONITOR_PROBE_TIMEOUT_MAX,
+              })}
+            </p>
+          )}
+        </div>
+        <div className='flex justify-end gap-2'>
+          <Button
+            type='button'
+            variant='outline'
+            size='sm'
+            onClick={() => setOpen(false)}
+          >
+            {t('Cancel')}
+          </Button>
+          <Button
+            type='button'
+            size='sm'
+            disabled={!canSave}
+            onClick={() => {
+              onSave({
+                ...setting,
+                curfewEnabled: enabled,
+                curfewStart: start,
+                curfewEnd: end,
+                probeTimeoutSeconds: timeoutValue,
+              })
+              setOpen(false)
+            }}
+          >
+            {t('Save')}
+          </Button>
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
 export function ChannelMonitor() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -295,15 +497,52 @@ export function ChannelMonitor() {
     queryClient.invalidateQueries({ queryKey: MONITOR_POLICY_KEY })
 
   const saveMonitorSetting = useMutation({
-    mutationFn: updateChannelMonitorSetting,
+    mutationFn: (next: ChannelMonitorSetting) =>
+      updateChannelMonitorSetting(next),
     onSuccess: (next) => {
       queryClient.setQueryData(MONITOR_SETTINGS_KEY, next)
-      toast.success(
-        t(
-          next.enabled
-            ? 'Monitoring master switch enabled'
-            : 'Monitoring master switch disabled'
-        )
+    },
+  })
+
+  const currentSetting: ChannelMonitorSetting = monitorSetting ?? {
+    enabled: true,
+    curfewEnabled: false,
+    curfewStart: '23:00',
+    curfewEnd: '07:00',
+    probeTimeoutSeconds: 60,
+  }
+
+  const toggleMasterSwitch = (enabled: boolean) => {
+    saveMonitorSetting.mutate(
+      { ...currentSetting, enabled },
+      {
+        onSuccess: () => {
+          toast.success(
+            t(
+              enabled
+                ? 'Monitoring master switch enabled'
+                : 'Monitoring master switch disabled'
+            )
+          )
+        },
+      }
+    )
+  }
+
+  const saveCurfew = (next: ChannelMonitorSetting) => {
+    saveMonitorSetting.mutate(next, {
+      onSuccess: () => toast.success(t('Curfew updated')),
+    })
+  }
+
+  const triggerMonitor = useMutation({
+    mutationFn: (channelId: number) => triggerChannelMonitorNow(channelId),
+    onSuccess: () => {
+      toast.success(t('Monitor probe triggered; it will run shortly.'))
+    },
+    onError: (error) => {
+      toast.error(
+        error instanceof Error ? error.message : t('Failed to trigger probe')
       )
     },
   })
@@ -458,12 +697,10 @@ export function ChannelMonitor() {
             >
               <Switch
                 size='lg'
-                checked={monitorSetting?.enabled ?? true}
+                checked={currentSetting.enabled}
                 disabled={monitorSettingLoading || saveMonitorSetting.isPending}
                 aria-label={t('Monitoring master switch')}
-                onCheckedChange={(enabled) =>
-                  saveMonitorSetting.mutate(enabled)
-                }
+                onCheckedChange={toggleMasterSwitch}
               />
               <span className='text-sm font-medium'>
                 {t('Monitoring master switch')}
@@ -475,6 +712,12 @@ export function ChannelMonitor() {
               )}
             </TooltipContent>
           </Tooltip>
+          <CurfewControl
+            setting={currentSetting}
+            disabled={monitorSettingLoading}
+            saving={saveMonitorSetting.isPending}
+            onSave={saveCurfew}
+          />
           <Badge variant='outline' className='shrink-0'>
             {t('Preview')}
           </Badge>
@@ -686,6 +929,37 @@ export function ChannelMonitor() {
                             </TooltipTrigger>
                             <TooltipContent>
                               {t('Run probe now')}
+                            </TooltipContent>
+                          </Tooltip>
+                          <Tooltip>
+                            <TooltipTrigger
+                              render={
+                                <Button
+                                  type='button'
+                                  variant='outline'
+                                  size='icon-sm'
+                                  disabled={
+                                    !row.config?.enabled ||
+                                    triggerMonitor.isPending
+                                  }
+                                  aria-label={t('Trigger monitoring now')}
+                                  onClick={() => triggerMonitor.mutate(row.id)}
+                                />
+                              }
+                            >
+                              <PlayCircle
+                                className={cn(
+                                  'size-3.5',
+                                  triggerMonitor.isPending &&
+                                    triggerMonitor.variables === row.id &&
+                                    'animate-pulse'
+                                )}
+                              />
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              {t(
+                                'Bring this channel’s next monitoring cycle forward to run now.'
+                              )}
                             </TooltipContent>
                           </Tooltip>
                           <Button

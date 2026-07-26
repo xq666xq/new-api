@@ -378,6 +378,43 @@ function ProbeSpeed({
   )
 }
 
+/**
+ * Admin-only routing badges for a channel+model pair: whether the model is
+ * currently enabled on this channel and the priority used to order it during
+ * selection. These describe routing state from the abilities table, not probe
+ * health, so a healthy sparkline can still show a disabled model (e.g. banned by
+ * the managed policy) and vice versa. Rendered before the probe speed.
+ */
+function ModelRouting({
+  enabled,
+  priority,
+}: {
+  enabled: boolean
+  priority: number
+}) {
+  const { t } = useTranslation()
+  return (
+    <div className='flex shrink-0 items-center gap-1.5 text-[11px] leading-none'>
+      <span
+        className={cn(
+          'inline-flex items-center rounded-full border px-2 py-0.5 font-medium',
+          enabled
+            ? 'border-[#52c41a]/30 bg-[#52c41a]/10 text-[#3f9714] dark:text-[#73d13d]'
+            : 'border-[#f5222d]/30 bg-[#f5222d]/10 text-[#f5222d] dark:text-[#ff7875]'
+        )}
+      >
+        {enabled ? t('Enabled') : t('Disabled')}
+      </span>
+      <span className='text-muted-foreground inline-flex items-center gap-1'>
+        {t('Priority')}
+        <span className='text-foreground font-semibold tabular-nums'>
+          {priority}
+        </span>
+      </span>
+    </div>
+  )
+}
+
 function ChannelCard({
   row,
   onSelectBucket,
@@ -441,7 +478,7 @@ function ChannelCard({
               <span className='text-muted-foreground'>{t('Requests')}</span>
             </div>
           </div>
-          <div className='flex min-w-0 items-baseline justify-between gap-3'>
+          <div className='flex min-w-0 items-center justify-between gap-3'>
             {showChannelName ? (
               <div
                 className='text-muted-foreground min-w-0 truncate text-xs'
@@ -452,10 +489,18 @@ function ChannelCard({
             ) : (
               <span />
             )}
-            <ProbeSpeed
-              ttftMs={row.lastTtftMs}
-              latencyMs={row.lastLatencyMs}
-            />
+            <div className='flex shrink-0 items-center gap-3'>
+              {showChannelName && (
+                <ModelRouting
+                  enabled={row.modelEnabled}
+                  priority={row.modelPriority}
+                />
+              )}
+              <ProbeSpeed
+                ttftMs={row.lastTtftMs}
+                latencyMs={row.lastLatencyMs}
+              />
+            </div>
           </div>
         </div>
       </div>

@@ -104,6 +104,18 @@ export interface ChannelMonitorRow {
 /** Global switch for scheduled probes and managed-policy execution. */
 export interface ChannelMonitorSetting {
   enabled: boolean
+  /** Daily quiet window master switch: while active, no channel is probed. */
+  curfewEnabled: boolean
+  /** Curfew start, local "HH:MM". A start later than the end wraps past midnight. */
+  curfewStart: string
+  /** Curfew end, local "HH:MM". */
+  curfewEnd: string
+  /**
+   * Per-probe timeout in seconds. A probe exceeding it is cancelled and recorded
+   * as a failure. Independent of the relay timeout, so it never shortens real
+   * forwarding. Clamped server-side to a safe range.
+   */
+  probeTimeoutSeconds: number
 }
 
 /** Final upstream HTTP exchange captured only for one manual probe response. */

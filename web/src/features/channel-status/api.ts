@@ -32,6 +32,8 @@ type RawRow = {
   last_checked_at: number
   last_ttft_ms: number
   last_latency_ms: number
+  model_enabled: boolean
+  model_priority: number
   recent_checks: RawCheck[]
 }
 
@@ -70,6 +72,8 @@ export async function getChannelStatus(
     lastCheckedAt: row.last_checked_at,
     lastTtftMs: row.last_ttft_ms,
     lastLatencyMs: row.last_latency_ms,
+    modelEnabled: row.model_enabled,
+    modelPriority: row.model_priority,
     recentChecks: row.recent_checks.map((check) => ({
       health: check.health,
       total: check.total,
@@ -105,6 +109,10 @@ export async function getModelStatus(
     lastCheckedAt: row.last_checked_at,
     lastTtftMs: row.last_ttft_ms,
     lastLatencyMs: row.last_latency_ms,
+    // The member view hides channel identity, so per-channel routing state is
+    // not surfaced; keep defaults regardless of what the endpoint returns.
+    modelEnabled: false,
+    modelPriority: 0,
     recentChecks: row.recent_checks.map((check) => ({
       health: check.health,
       total: check.total,

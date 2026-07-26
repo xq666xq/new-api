@@ -38,6 +38,15 @@ export interface ChannelStatusRow {
   lastCheckedAt: number
   lastTtftMs: number
   lastLatencyMs: number
+  /**
+   * Current routing state of this channel+model pair from the abilities table:
+   * whether the model is enabled on this channel and the priority used to order
+   * it during selection. Admin (channel) view only; the aggregated member view
+   * leaves these at their defaults (modelEnabled false, modelPriority 0) since it
+   * hides channel identity.
+   */
+  modelEnabled: boolean
+  modelPriority: number
   recentChecks: RecentCheck[]
 }
 

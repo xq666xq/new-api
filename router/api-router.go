@@ -326,6 +326,7 @@ func SetApiRouter(router *gin.Engine) {
 			channelMonitorRoute.GET("/status", controller.GetChannelMonitorStatus)
 			channelMonitorRoute.GET("/status/details", controller.GetChannelMonitorResultDetails)
 			channelMonitorRoute.POST("/probe", controller.ProbeChannelMonitorNow)
+			channelMonitorRoute.POST("/trigger", controller.TriggerChannelMonitorNow)
 			channelMonitorRoute.POST("/config", controller.SaveChannelMonitorConfig)
 			channelMonitorRoute.GET("/settings", controller.GetChannelMonitorSetting)
 			channelMonitorRoute.PUT("/settings", controller.UpdateChannelMonitorSetting)
