@@ -606,12 +606,14 @@ func truncateManagedText(text string, max int) string {
 	return string(runes[:max]) + "…"
 }
 
-// appendRecommendationSection appends the "推荐使用" model list to a ban/recover
-// card. The list is model-facing only — model name, the recommending channel's
-// latest probe speed (首字 time-to-first-token / 延迟 total latency), and the
-// operator blurb — never the channel behind it, as requested. It is best-effort:
-// a lookup error or an empty list simply omits the section so a recommendation
-// hiccup never blocks the alert.
+// appendRecommendationSection appends the "推荐使用模型" model list to a ban/recover
+// or curfew-end card. The list is model-facing only — model name, the recommending
+// channel's latest probe speed (首字 time-to-first-token / 延迟 total latency), and
+// the operator blurb — never the channel behind it, as requested. It is best-effort
+// on the lookup: an error simply omits the section so a recommendation hiccup never
+// blocks the alert. When the list is empty (no positive-weight recommendation, or
+// every recommended model is currently down) the title is still shown with a
+// "暂无可用模型" placeholder so the reader always sees the section.
 //
 // Layout: each model is one line — a gradient-colored, bold model name followed by
 // its speed in parentheses (首字/延迟, each colored by tier) — with an optional
@@ -623,10 +625,11 @@ func appendRecommendationSection(b *strings.Builder) {
 		common.SysError("managed policy: build recommendation list failed: " + err.Error())
 		return
 	}
+	b.WriteString("\n---\n\n### 🌟 推荐使用模型\n\n")
 	if len(list) == 0 {
+		b.WriteString("暂无可用模型，请等待恢复喵！\n")
 		return
 	}
-	b.WriteString("\n---\n\n### 🌟 推荐使用\n\n")
 	for _, item := range list {
 		b.WriteString(fmt.Sprintf("%s （首字 %s · 延迟 %s）\n\n",
 			gradientModelName(item.Model),

@@ -632,6 +632,7 @@
     "Batch testing models...": "Batch testing models...",
     "Batch upstream model update": "Batch upstream model update",
     "Channel monitor": "Channel monitor",
+    "Channel curfew notification": "Channel curfew notification",
     "Batch upstream model updates applied: {{channels}} channels, {{added}} added, {{removed}} removed, {{fails}} failed": "Batch upstream model updates applied: {{channels}} channels, {{added}} added, {{removed}} removed, {{fails}} failed",
     "Best for single-tenant deployments. Pricing and billing options stay hidden.": "Best for single-tenant deployments. Pricing and billing options stay hidden.",
     "Best TTFT": "Best TTFT",

@@ -22,6 +22,13 @@ const (
 	SystemTaskTypeMidjourneyPoll = "midjourney_poll"
 	SystemTaskTypeAsyncTaskPoll  = "async_task_poll"
 	SystemTaskTypeChannelMonitor = "channel_monitor"
+	// SystemTaskTypeCurfewNotify pushes the "good night / good morning" DingTalk
+	// card at the two channel-monitor curfew boundaries. It is a separate task
+	// from channel_monitor because the monitor task is entirely skipped during
+	// curfew (both its Enabled() and Run() return early), so a curfew-end
+	// transition can only be detected by an independent job that keeps running
+	// through the quiet window.
+	SystemTaskTypeCurfewNotify = "channel_curfew_notify"
 )
 
 var ErrSystemTaskLockLost = errors.New("system task lock lost")
