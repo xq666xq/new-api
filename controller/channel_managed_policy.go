@@ -94,6 +94,19 @@ type managedModelPair struct {
 	model     string
 }
 
+// managedFlipEvent records one ban/recover flip so the ban stage can defer
+// notification and aggregate every flip of the same (channel, action) into a
+// single alert. A channel's models usually rise and fall together, so a per-model
+// notification would fan out N near-identical cards for one incident; grouping
+// them keeps one card per channel per action (e.g. "封禁: A、B" + "恢复: C").
+type managedFlipEvent struct {
+	pair   managedModelPair
+	action string // "banned" or "recovered"
+	reason string
+	state  *model.ChannelManagedState
+	latest *model.ChannelMonitorResult
+}
+
 // collectManagedPairs expands the managed configs into their monitored models,
 // keeping only models the channel still actually serves (mirrors the guard the
 // status page uses so a stale monitored-model entry is ignored).
@@ -132,35 +145,40 @@ func collectManagedPairs(configs []*model.ChannelMonitorConfig) []managedModelPa
 }
 
 // applyManagedBanStage runs the circuit breaker for every managed (channel,
-// model) pair and returns whether any ability enable/disable was applied.
+// model) pair and returns whether any ability enable/disable was applied. Flip
+// notifications are deferred and aggregated per (channel, action) so a channel
+// whose models rise or fall together produces one card per action instead of one
+// per model.
 func applyManagedBanStage(configs []*model.ChannelMonitorConfig, setting *operation_setting.ManagedPolicySetting) bool {
 	pairs := collectManagedPairs(configs)
-	changed := false
+	events := make([]managedFlipEvent, 0)
 	for _, pair := range pairs {
-		if applyBanForPair(pair, setting) {
-			changed = true
+		if event := applyBanForPair(pair, setting); event != nil {
+			events = append(events, *event)
 		}
 	}
-	return changed
+	notifyManagedFlips(events)
+	return len(events) > 0
 }
 
 // applyBanForPair advances the confirmation counter for one pair from its most
-// recent probe and flips ban state when the threshold is reached. Returns whether
-// an ability status change was applied.
-func applyBanForPair(pair managedModelPair, setting *operation_setting.ManagedPolicySetting) bool {
+// recent probe and flips ban state when the threshold is reached. It returns a
+// non-nil flip event (for the caller to aggregate and notify) exactly when an
+// ability status change was applied, and nil otherwise.
+func applyBanForPair(pair managedModelPair, setting *operation_setting.ManagedPolicySetting) *managedFlipEvent {
 	latest, err := model.GetLatestChannelMonitorResult(pair.channelID, pair.model)
 	if err != nil {
 		common.SysError(fmt.Sprintf("managed policy: latest result lookup failed channel=%d model=%s: %v", pair.channelID, pair.model, err))
-		return false
+		return nil
 	}
 	if latest == nil {
-		return false // no probe yet, nothing to decide on
+		return nil // no probe yet, nothing to decide on
 	}
 
 	state, err := model.GetChannelManagedState(pair.channelID, pair.model)
 	if err != nil {
 		common.SysError(fmt.Sprintf("managed policy: state lookup failed channel=%d model=%s: %v", pair.channelID, pair.model, err))
-		return false
+		return nil
 	}
 	if state == nil {
 		state = &model.ChannelManagedState{
@@ -179,7 +197,7 @@ func applyBanForPair(pair managedModelPair, setting *operation_setting.ManagedPo
 	channel, channelErr := model.GetChannelById(pair.channelID, false)
 	if channelErr != nil || channel == nil {
 		common.SysError(fmt.Sprintf("managed policy: channel lookup failed channel=%d model=%s: %v", pair.channelID, pair.model, channelErr))
-		return false
+		return nil
 	}
 	channelDisabled := channel.Status != common.ChannelStatusEnabled
 
@@ -208,7 +226,7 @@ func applyBanForPair(pair managedModelPair, setting *operation_setting.ManagedPo
 				common.SysError(fmt.Sprintf("managed policy: reset confirmation state failed channel=%d model=%s: %v", pair.channelID, pair.model, err))
 			}
 		}
-		return false
+		return nil
 	}
 
 	// Disagreeing probe. Only count it if it is a new probe spaced at least
@@ -216,7 +234,7 @@ func applyBanForPair(pair managedModelPair, setting *operation_setting.ManagedPo
 	// fresh, sufficiently-spaced probe. This also makes re-running the engine on
 	// the same probe a no-op (CheckedAt unchanged).
 	if state.LastConfirmProbeAt != 0 && latest.CheckedAt-state.LastConfirmProbeAt < interval {
-		return false
+		return nil
 	}
 
 	state.ConfirmCount++
@@ -230,12 +248,13 @@ func applyBanForPair(pair managedModelPair, setting *operation_setting.ManagedPo
 		if err := model.UpsertChannelManagedState(state); err != nil {
 			common.SysError(fmt.Sprintf("managed policy: persist confirmation state failed channel=%d model=%s: %v", pair.channelID, pair.model, err))
 		}
-		return false
+		return nil
 	}
 
 	// Threshold reached: flip the stable state and apply it to the ability rows.
+	// The flip is reported back to the caller as a managedFlipEvent so it can be
+	// aggregated with the other flips in this sweep and notified once per channel.
 	now := common.GetTimestamp()
-	changed := false
 	if stableIsActive {
 		// active -> banned: disable this model on this channel.
 		enabled := false
@@ -244,36 +263,33 @@ func applyBanForPair(pair managedModelPair, setting *operation_setting.ManagedPo
 		state.ConfirmCount = 0
 		if err := model.ApplyChannelManagedAbilityState(state, &enabled, nil); err != nil {
 			common.SysError(fmt.Sprintf("managed policy: disable ability failed channel=%d model=%s: %v", pair.channelID, pair.model, err))
-			return false
+			return nil
 		}
-		changed = true
-		notifyManagedAction(pair, "banned", "连续探测失败达到确认次数", state, latest)
-	} else {
-		// banned -> active: re-enable this model on this channel.
-		enabled := true
-		state.BanState = model.ManagedBanStateActive
-		state.LastRecoverAt = now
-		state.ConfirmCount = 0
-		if err := model.ApplyChannelManagedAbilityState(state, &enabled, nil); err != nil {
-			common.SysError(fmt.Sprintf("managed policy: enable ability failed channel=%d model=%s: %v", pair.channelID, pair.model, err))
-			return false
-		}
-		// When the flip was driven by a channel-level disable, the per-model ability
-		// alone is not enough: the memory-cache selection path routes on the
-		// channel's own status, so the channel must be re-enabled to serve traffic
-		// again. UpdateChannelStatus flips every ability on this channel back to
-		// enabled, so replay the managed states afterwards to keep this channel's
-		// other models that the policy still bans disabled.
-		if channelDisabled {
-			model.UpdateChannelStatus(pair.channelID, "", common.ChannelStatusEnabled, "")
-			if err := model.ReplayManagedAbilities(nil, pair.channelID); err != nil {
-				common.SysError(fmt.Sprintf("managed policy: replay abilities after channel recover failed channel=%d: %v", pair.channelID, err))
-			}
-		}
-		changed = true
-		notifyManagedAction(pair, "recovered", "连续探测成功达到确认次数", state, latest)
+		return &managedFlipEvent{pair: pair, action: "banned", reason: "连续探测失败达到确认次数", state: state, latest: latest}
 	}
-	return changed
+
+	// banned -> active: re-enable this model on this channel.
+	enabled := true
+	state.BanState = model.ManagedBanStateActive
+	state.LastRecoverAt = now
+	state.ConfirmCount = 0
+	if err := model.ApplyChannelManagedAbilityState(state, &enabled, nil); err != nil {
+		common.SysError(fmt.Sprintf("managed policy: enable ability failed channel=%d model=%s: %v", pair.channelID, pair.model, err))
+		return nil
+	}
+	// When the flip was driven by a channel-level disable, the per-model ability
+	// alone is not enough: the memory-cache selection path routes on the
+	// channel's own status, so the channel must be re-enabled to serve traffic
+	// again. UpdateChannelStatus flips every ability on this channel back to
+	// enabled, so replay the managed states afterwards to keep this channel's
+	// other models that the policy still bans disabled.
+	if channelDisabled {
+		model.UpdateChannelStatus(pair.channelID, "", common.ChannelStatusEnabled, "")
+		if err := model.ReplayManagedAbilities(nil, pair.channelID); err != nil {
+			common.SysError(fmt.Sprintf("managed policy: replay abilities after channel recover failed channel=%d: %v", pair.channelID, err))
+		}
+	}
+	return &managedFlipEvent{pair: pair, action: "recovered", reason: "连续探测成功达到确认次数", state: state, latest: latest}
 }
 
 // applyManagedSpeedStage ranks channels per model by recent mean TTFT and assigns
@@ -439,113 +455,171 @@ func applyManagedPriority(pair managedModelPair, priority int64) bool {
 	return true
 }
 
-// notifyManagedAction alerts operators when the policy bans or recovers a model.
-// It fans out to two channels, both best-effort (a failure is logged, never
-// propagated, so notification never disrupts the policy sweep):
+// notifyManagedFlips aggregates the ban/recover flips from one policy sweep and
+// sends one notification per (channel, action) group instead of one per model.
+// A managed channel's models usually rise and fall together, so a per-model alert
+// fanned out N near-identical cards for a single incident; grouping collapses them
+// into one card per action that lists every affected model (e.g. one 封禁 card for
+// models A and B, one 恢复 card for model C). Groups keep first-seen order so the
+// output is stable across sweeps.
+func notifyManagedFlips(events []managedFlipEvent) {
+	if len(events) == 0 {
+		return
+	}
+	type groupKey struct {
+		channelID int
+		action    string
+	}
+	groups := make(map[groupKey][]managedFlipEvent)
+	order := make([]groupKey, 0)
+	for _, event := range events {
+		key := groupKey{channelID: event.pair.channelID, action: event.action}
+		if _, ok := groups[key]; !ok {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], event)
+	}
+	for _, key := range order {
+		notifyManagedFlipGroup(groups[key])
+	}
+}
+
+// notifyManagedFlipGroup alerts operators about one channel's ban or recover flips
+// that share the same action. The group is non-empty and every event in it shares
+// the same channel and action. It fans out to two best-effort channels (a failure
+// is logged, never propagated, so notification never disrupts the policy sweep):
 //
 //   - the existing root-user notification (email/webhook/bark/gotify), for parity
 //     with channel disable/enable alerts, and
 //   - an optional DingTalk action card, when configured in the managed policy.
-//
-// `state` carries the just-flipped ban state. Because a ban only writes LastBanAt
-// and a recover only writes LastRecoverAt, the opposite timestamp still holds the
-// prior event's time, so "time since last recover/ban" reads correctly here.
-// `latest` is the probe that triggered the flip (its ErrorMessage feeds the ban
-// card). Either may be nil; the card degrades gracefully.
-func notifyManagedAction(pair managedModelPair, action string, reason string, state *model.ChannelManagedState, latest *model.ChannelMonitorResult) {
+func notifyManagedFlipGroup(group []managedFlipEvent) {
+	first := group[0]
+	channelNm := first.pair.channelNm
+	channelID := first.pair.channelID
+	action := first.action
+
+	models := make([]string, 0, len(group))
+	for _, event := range group {
+		models = append(models, event.pair.model)
+	}
+	modelList := strings.Join(models, "、")
+
 	var subject, content string
 	switch action {
 	case "banned":
-		subject = fmt.Sprintf("托管策略：渠道「%s」（#%d）模型 %s 已封禁", pair.channelNm, pair.channelID, pair.model)
-		content = fmt.Sprintf("托管策略封禁了渠道「%s」（#%d）的模型 %s，原因：%s", pair.channelNm, pair.channelID, pair.model, reason)
+		subject = fmt.Sprintf("托管策略：渠道「%s」（#%d）已封禁 %d 个模型", channelNm, channelID, len(models))
+		content = fmt.Sprintf("托管策略封禁了渠道「%s」（#%d）的模型 %s，原因：%s", channelNm, channelID, modelList, first.reason)
 	case "recovered":
-		subject = fmt.Sprintf("托管策略：渠道「%s」（#%d）模型 %s 已恢复", pair.channelNm, pair.channelID, pair.model)
-		content = fmt.Sprintf("托管策略恢复了渠道「%s」（#%d）的模型 %s，原因：%s", pair.channelNm, pair.channelID, pair.model, reason)
+		subject = fmt.Sprintf("托管策略：渠道「%s」（#%d）已恢复 %d 个模型", channelNm, channelID, len(models))
+		content = fmt.Sprintf("托管策略恢复了渠道「%s」（#%d）的模型 %s，原因：%s", channelNm, channelID, modelList, first.reason)
 	default:
 		return
 	}
-	service.NotifyRootUser(fmt.Sprintf("managed_%d_%s_%s", pair.channelID, pair.model, action), subject, content)
-	notifyManagedActionDingTalk(pair, action, state, latest)
+	// One notification key per (channel, action) so the limiter buckets a whole
+	// incident together instead of once per model.
+	service.NotifyRootUser(fmt.Sprintf("managed_%d_%s", channelID, action), subject, content)
+	notifyManagedFlipGroupDingTalk(group)
 }
 
-// notifyManagedActionDingTalk sends the ban/recover DingTalk action card when the
-// integration is enabled and configured. It runs the network call in a goroutine
-// so a slow DingTalk endpoint never stalls the 15s policy sweep, and swallows all
-// errors into the log (best-effort, like every other notification path).
-func notifyManagedActionDingTalk(pair managedModelPair, action string, state *model.ChannelManagedState, latest *model.ChannelMonitorResult) {
+// notifyManagedFlipGroupDingTalk sends the aggregated ban/recover DingTalk action
+// card for one (channel, action) group when the integration is enabled. It runs
+// the network call in a goroutine so a slow DingTalk endpoint never stalls the 15s
+// policy sweep, and swallows all errors into the log (best-effort, like every
+// other notification path).
+func notifyManagedFlipGroupDingTalk(group []managedFlipEvent) {
 	setting := operation_setting.GetManagedPolicySetting()
 	if !setting.DingTalkEnabled || strings.TrimSpace(setting.DingTalkWebhookURL) == "" {
 		return
 	}
-	title, markdown := buildManagedDingTalkCard(pair, action, state, latest)
+	title, markdown := buildManagedDingTalkCard(group)
 	if title == "" {
 		return
 	}
 	webhook := setting.DingTalkWebhookURL
 	secret := setting.DingTalkSecret
+	channelID := group[0].pair.channelID
+	action := group[0].action
 	go func() {
 		// No jump button: the card is intentionally self-contained.
 		if err := service.SendDingTalkActionCard(webhook, secret, title, markdown, ""); err != nil {
-			common.SysError(fmt.Sprintf("managed policy: dingtalk notify failed channel=%d model=%s action=%s: %v", pair.channelID, pair.model, action, err))
+			common.SysError(fmt.Sprintf("managed policy: dingtalk notify failed channel=%d action=%s: %v", channelID, action, err))
 		}
 	}()
 }
 
-// buildManagedDingTalkCard composes the action card title and markdown body for a
-// ban or recover event. The ban card shows time since the last recover and the
-// triggering probe's error; the recover card shows time since the last ban plus
-// the recent mean first-token and latency (with graceful "暂无数据" fallbacks).
-// Returns ("", "") for an unknown action so the caller skips sending.
-func buildManagedDingTalkCard(pair managedModelPair, action string, state *model.ChannelManagedState, latest *model.ChannelMonitorResult) (string, string) {
+// buildManagedDingTalkCard composes the aggregated action card title and markdown
+// body for one (channel, action) group. The channel is named once and every
+// affected model is listed with its own detail block: the ban card shows each
+// model's time-since-last-recover and triggering probe error; the recover card
+// shows each model's time-since-last-ban plus recent mean first-token and latency
+// (with graceful "暂无数据" fallbacks). The recommendation section is appended once
+// at the end. Returns ("", "") for an unknown action so the caller skips sending.
+func buildManagedDingTalkCard(group []managedFlipEvent) (string, string) {
+	if len(group) == 0 {
+		return "", ""
+	}
 	now := common.GetTimestamp()
-	// DingTalk markdown supports <font color>; colorize the channel and model
-	// names so operators can spot the affected target at a glance.
-	channelName := fmt.Sprintf("<font color=\"#1677ff\">**%s**</font>", pair.channelNm)
-	channelLabel := fmt.Sprintf("渠道 %s（#%d）", channelName, pair.channelID)
+	first := group[0]
+	action := first.action
+	// DingTalk markdown supports <font color>; colorize the channel name so
+	// operators can spot the affected channel at a glance.
+	channelName := fmt.Sprintf("<font color=\"#1677ff\">**%s**</font>", first.pair.channelNm)
+	channelLabel := fmt.Sprintf("渠道 %s（#%d）", channelName, first.pair.channelID)
+
+	models := make([]string, 0, len(group))
+	for _, event := range group {
+		models = append(models, event.pair.model)
+	}
+	modelSummary := truncateManagedText(strings.Join(models, "、"), 40)
+
 	switch action {
 	case "banned":
-		title := fmt.Sprintf("🔴 模型封禁 · %s", pair.model)
-		modelName := fmt.Sprintf("<font color=\"#f5222d\">**%s**</font>", pair.model)
+		title := fmt.Sprintf("🔴 模型封禁 · %s", modelSummary)
 		var b strings.Builder
 		b.WriteString("## 🔴 托管渠道封禁\n\n")
 		b.WriteString(fmt.Sprintf("%s\n\n", channelLabel))
-		b.WriteString(fmt.Sprintf("- **模型**：%s\n", modelName))
-		if state != nil && state.LastRecoverAt > 0 {
-			b.WriteString(fmt.Sprintf("- **距上次恢复**：%s\n", humanizeManagedDuration(now-state.LastRecoverAt)))
-		} else {
-			b.WriteString("- **距上次恢复**：暂无记录\n")
+		for _, event := range group {
+			modelName := fmt.Sprintf("<font color=\"#f5222d\">**%s**</font>", event.pair.model)
+			b.WriteString(fmt.Sprintf("**🔻 %s**\n\n", modelName))
+			if event.state != nil && event.state.LastRecoverAt > 0 {
+				b.WriteString(fmt.Sprintf("- **距上次恢复**：%s\n", humanizeManagedDuration(now-event.state.LastRecoverAt)))
+			} else {
+				b.WriteString("- **距上次恢复**：暂无记录\n")
+			}
+			errMsg := "无"
+			if event.latest != nil && strings.TrimSpace(event.latest.ErrorMessage) != "" {
+				errMsg = truncateManagedText(strings.TrimSpace(event.latest.ErrorMessage), 300)
+			}
+			b.WriteString(fmt.Sprintf("- **最后错误**：%s\n\n", errMsg))
 		}
-		errMsg := "无"
-		if latest != nil && strings.TrimSpace(latest.ErrorMessage) != "" {
-			errMsg = truncateManagedText(strings.TrimSpace(latest.ErrorMessage), 300)
-		}
-		b.WriteString(fmt.Sprintf("- **最后错误**：%s\n", errMsg))
 		appendRecommendationSection(&b)
 		return title, b.String()
 	case "recovered":
-		title := fmt.Sprintf("🟢 模型恢复 · %s", pair.model)
-		modelName := fmt.Sprintf("<font color=\"#52c41a\">**%s**</font>", pair.model)
+		title := fmt.Sprintf("🟢 模型恢复 · %s", modelSummary)
+		window := operation_setting.GetManagedPolicySetting().SpeedWindow
 		var b strings.Builder
 		b.WriteString("## 🟢 托管渠道恢复\n\n")
 		b.WriteString(fmt.Sprintf("%s\n\n", channelLabel))
-		b.WriteString(fmt.Sprintf("- **模型**：%s\n", modelName))
-		if state != nil && state.LastBanAt > 0 {
-			b.WriteString(fmt.Sprintf("- **距上次封禁**：%s\n", humanizeManagedDuration(now-state.LastBanAt)))
-		} else {
-			b.WriteString("- **距上次封禁**：暂无记录\n")
-		}
-		window := operation_setting.GetManagedPolicySetting().SpeedWindow
-		ttftMean, ttftCount, err := model.GetRecentTtftMean(pair.channelID, pair.model, window)
-		if err == nil && ttftCount > 0 {
-			b.WriteString(fmt.Sprintf("- **平均首字**：%s（近 %d 次）\n", formatManagedMs(ttftMean), ttftCount))
-		} else {
-			b.WriteString("- **平均首字**：暂无数据\n")
-		}
-		latencyMean, latencyCount, err := model.GetRecentLatencyMean(pair.channelID, pair.model, window)
-		if err == nil && latencyCount > 0 {
-			b.WriteString(fmt.Sprintf("- **平均延迟**：%s（近 %d 次）\n", formatManagedMs(latencyMean), latencyCount))
-		} else {
-			b.WriteString("- **平均延迟**：暂无数据\n")
+		for _, event := range group {
+			modelName := fmt.Sprintf("<font color=\"#52c41a\">**%s**</font>", event.pair.model)
+			b.WriteString(fmt.Sprintf("**🔺 %s**\n\n", modelName))
+			if event.state != nil && event.state.LastBanAt > 0 {
+				b.WriteString(fmt.Sprintf("- **距上次封禁**：%s\n", humanizeManagedDuration(now-event.state.LastBanAt)))
+			} else {
+				b.WriteString("- **距上次封禁**：暂无记录\n")
+			}
+			ttftMean, ttftCount, err := model.GetRecentTtftMean(event.pair.channelID, event.pair.model, window)
+			if err == nil && ttftCount > 0 {
+				b.WriteString(fmt.Sprintf("- **平均首字**：%s（近 %d 次）\n", formatManagedMs(ttftMean), ttftCount))
+			} else {
+				b.WriteString("- **平均首字**：暂无数据\n")
+			}
+			latencyMean, latencyCount, err := model.GetRecentLatencyMean(event.pair.channelID, event.pair.model, window)
+			if err == nil && latencyCount > 0 {
+				b.WriteString(fmt.Sprintf("- **平均延迟**：%s（近 %d 次）\n\n", formatManagedMs(latencyMean), latencyCount))
+			} else {
+				b.WriteString("- **平均延迟**：暂无数据\n\n")
+			}
 		}
 		appendRecommendationSection(&b)
 		return title, b.String()

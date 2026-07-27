@@ -116,8 +116,9 @@ func TestApplyBanForPairRecoversManuallyDisabledManagedChannel(t *testing.T) {
 	}
 	pair := managedModelPair{channelID: channelID, channelNm: "hosted-a", model: "model-a"}
 
-	changed := applyBanForPair(pair, setting)
-	require.True(t, changed, "successful probe on a disabled managed channel must trigger recovery")
+	event := applyBanForPair(pair, setting)
+	require.NotNil(t, event, "successful probe on a disabled managed channel must trigger recovery")
+	assert.Equal(t, "recovered", event.action)
 
 	// Channel is re-enabled: the selection path routes on channel status.
 	var channel model.Channel
@@ -166,9 +167,46 @@ func TestApplyBanForPairKeepsEnabledChannelPerModelSemantics(t *testing.T) {
 	setting := &operation_setting.ManagedPolicySetting{BanEnabled: true, ConfirmCount: 1}
 	pair := managedModelPair{channelID: channelID, channelNm: "hosted-b", model: "model-a"}
 
-	assert.False(t, applyBanForPair(pair, setting), "agreeing probe on an enabled channel is a no-op")
+	assert.Nil(t, applyBanForPair(pair, setting), "agreeing probe on an enabled channel is a no-op")
 
 	var channel model.Channel
 	require.NoError(t, db.First(&channel, channelID).Error)
 	assert.Equal(t, common.ChannelStatusEnabled, channel.Status)
+}
+
+// TestBuildManagedDingTalkCardAggregatesModels proves the aggregation contract:
+// several flips of the same channel and action collapse into one card that names
+// the channel once and lists every affected model, rather than one card per model.
+func TestBuildManagedDingTalkCardAggregatesModels(t *testing.T) {
+	// The card appends the recommendation section, which reads channel abilities;
+	// provision an isolated DB with the tables it touches so the lookup returns an
+	// empty list instead of hitting a nil DB.
+	db := newBanStageTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.ChannelRecommendation{}))
+
+	group := []managedFlipEvent{
+		{
+			pair:   managedModelPair{channelID: 7, channelNm: "hosted-a", model: "model-a"},
+			action: "banned",
+			state:  &model.ChannelManagedState{ChannelId: 7, ModelName: "model-a"},
+			latest: &model.ChannelMonitorResult{ErrorMessage: "429 rate limited"},
+		},
+		{
+			pair:   managedModelPair{channelID: 7, channelNm: "hosted-a", model: "model-b"},
+			action: "banned",
+			state:  &model.ChannelManagedState{ChannelId: 7, ModelName: "model-b"},
+			latest: &model.ChannelMonitorResult{ErrorMessage: "500 upstream"},
+		},
+	}
+
+	title, markdown := buildManagedDingTalkCard(group)
+	assert.Contains(t, title, "model-a")
+	assert.Contains(t, title, "model-b")
+	assert.Contains(t, markdown, "托管渠道封禁")
+	assert.Contains(t, markdown, "model-a")
+	assert.Contains(t, markdown, "model-b")
+	assert.Contains(t, markdown, "429 rate limited")
+	assert.Contains(t, markdown, "500 upstream")
+	// The channel is named once, not once per model.
+	assert.Equal(t, 1, strings.Count(markdown, "hosted-a"), "channel is named once for the whole group")
 }
