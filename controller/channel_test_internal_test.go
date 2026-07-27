@@ -2,6 +2,7 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -389,4 +390,49 @@ func TestApplyMonitorRequestHeadersAllowsClientIdentityAndBlocksProtectedHeaders
 	assert.Equal(t, "request-123", overrides["x-client-request-id"])
 	assert.NotContains(t, overrides, "authorization")
 	assert.NotContains(t, overrides, "chatgpt-account-id")
+}
+
+// TestAbnormalStreamEndErrorClassifiesProbeOutcome guards the probe-success
+// contract: a streamed relay handler returns nil no matter how the stream ended,
+// so the probe classifies the outcome from StreamStatus itself. A clean end
+// (Done/EOF/HandlerStop) must stay a success (nil error), while a truncation
+// caused by the probe timeout, a mid-stream abort, a scanner error, a keepalive
+// failure, or a panic must become a probe failure. Without this, a channel that
+// never finishes streaming within the probe timeout was recorded as 成功 with
+// latency pinned to the timeout.
+func TestAbnormalStreamEndErrorClassifiesProbeOutcome(t *testing.T) {
+	tests := []struct {
+		name    string
+		reason  relaycommon.StreamEndReason
+		endErr  error
+		wantErr bool
+	}{
+		{name: "nil status is normal"},
+		{name: "done", reason: relaycommon.StreamEndReasonDone},
+		{name: "eof", reason: relaycommon.StreamEndReasonEOF},
+		{name: "handler stop", reason: relaycommon.StreamEndReasonHandlerStop},
+		{name: "timeout", reason: relaycommon.StreamEndReasonTimeout, wantErr: true},
+		{name: "client gone", reason: relaycommon.StreamEndReasonClientGone, endErr: context.DeadlineExceeded, wantErr: true},
+		{name: "scanner error", reason: relaycommon.StreamEndReasonScannerErr, endErr: fmt.Errorf("boom"), wantErr: true},
+		{name: "ping fail", reason: relaycommon.StreamEndReasonPingFail, wantErr: true},
+		{name: "panic", reason: relaycommon.StreamEndReasonPanic, wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var status *relaycommon.StreamStatus
+			if test.name != "nil status is normal" {
+				status = relaycommon.NewStreamStatus()
+				status.SetEndReason(test.reason, test.endErr)
+			}
+
+			err := abnormalStreamEndError(status)
+
+			if test.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }

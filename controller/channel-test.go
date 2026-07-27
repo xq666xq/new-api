@@ -622,6 +622,23 @@ func testChannelThroughRelayCore(c *gin.Context, w *httptest.ResponseRecorder, t
 		return testResult{context: c, localErr: relayErr, newAPIError: relayErr}
 	}
 
+	// A streamed relay handler returns nil even when the stream was cut short by
+	// the probe's own context deadline (StreamEndReasonClientGone / Timeout),
+	// a scanner error, or a panic: it simply stops consuming and hands back the
+	// partial usage. For a health probe that silent truncation is a failure, not a
+	// success — otherwise a channel that never finishes streaming within the probe
+	// timeout is recorded as "成功" with latency pinned to the timeout. Treat any
+	// abnormal stream end as a failed probe.
+	if info.IsStream {
+		if streamErr := abnormalStreamEndError(info.StreamStatus); streamErr != nil {
+			return testResult{
+				context:     c,
+				localErr:    streamErr,
+				newAPIError: types.NewOpenAIError(streamErr, types.ErrorCodeBadResponse, http.StatusGatewayTimeout),
+			}
+		}
+	}
+
 	result := w.Result()
 	respBody, err := readTestResponseBody(result.Body, info.IsStream)
 	if err != nil {
@@ -640,6 +657,43 @@ func testChannelThroughRelayCore(c *gin.Context, w *httptest.ResponseRecorder, t
 	}
 
 	return testResult{context: c, ttftMs: monitorTtftMs(info)}
+}
+
+// abnormalStreamEndError maps a stream's end reason to a probe error, or nil when
+// the stream ended normally. A relay stream handler returns nil regardless of how
+// the stream ended, so the probe must inspect StreamStatus itself to distinguish a
+// clean finish (Done/EOF/HandlerStop) from a truncation caused by the probe's own
+// context deadline (ClientGone), the streaming idle timeout, a scanner error, a
+// ping failure, or a goroutine panic. A nil or never-populated status is treated
+// as normal so a non-scanner handler is never misreported. The returned error text
+// is what lands in the probe record's 错误消息 column.
+func abnormalStreamEndError(status *relaycommon.StreamStatus) error {
+	if status == nil {
+		return nil
+	}
+	switch status.EndReason {
+	case relaycommon.StreamEndReasonTimeout:
+		return fmt.Errorf("stream did not complete before the probe timeout")
+	case relaycommon.StreamEndReasonClientGone:
+		if status.EndError != nil {
+			return fmt.Errorf("stream aborted before completion: %v", status.EndError)
+		}
+		return fmt.Errorf("stream aborted before completion")
+	case relaycommon.StreamEndReasonScannerErr:
+		if status.EndError != nil {
+			return fmt.Errorf("stream read error: %v", status.EndError)
+		}
+		return fmt.Errorf("stream read error")
+	case relaycommon.StreamEndReasonPingFail:
+		return fmt.Errorf("stream keepalive failed")
+	case relaycommon.StreamEndReasonPanic:
+		if status.EndError != nil {
+			return fmt.Errorf("stream handler panic: %v", status.EndError)
+		}
+		return fmt.Errorf("stream handler panic")
+	default:
+		return nil
+	}
 }
 
 // monitorTtftMs returns the time-to-first-token in milliseconds for a completed
