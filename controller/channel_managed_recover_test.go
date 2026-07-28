@@ -174,10 +174,41 @@ func TestApplyBanForPairKeepsEnabledChannelPerModelSemantics(t *testing.T) {
 	assert.Equal(t, common.ChannelStatusEnabled, channel.Status)
 }
 
-// TestBuildManagedDingTalkCardAggregatesModels proves the aggregation contract:
-// several flips of the same channel and action collapse into one card that names
-// the channel once and lists every affected model, rather than one card per model.
-func TestBuildManagedDingTalkCardAggregatesModels(t *testing.T) {
+func TestGroupManagedFlipsByAction(t *testing.T) {
+	events := []managedFlipEvent{
+		{pair: managedModelPair{channelID: 7, model: "model-a"}, action: "recovered"},
+		{pair: managedModelPair{channelID: 8, model: "model-b"}, action: "banned"},
+		{pair: managedModelPair{channelID: 9, model: "model-c"}, action: "recovered"},
+		{pair: managedModelPair{channelID: 8, model: "model-d"}, action: "banned"},
+	}
+
+	groups := groupManagedFlipsByAction(events)
+	require.Len(t, groups, 2, "one sweep must create at most one group per action")
+	assert.Equal(t, []string{"model-a", "model-c"}, []string{groups[0][0].pair.model, groups[0][1].pair.model})
+	assert.Equal(t, []string{"model-b", "model-d"}, []string{groups[1][0].pair.model, groups[1][1].pair.model})
+	assert.Equal(t, "recovered", groups[0][0].action, "action groups retain first-seen order")
+	assert.Equal(t, "banned", groups[1][0].action)
+}
+
+func TestBuildManagedRootNotificationAggregatesChannelsAndModels(t *testing.T) {
+	batch := []managedFlipEvent{
+		{pair: managedModelPair{channelID: 7, channelNm: "hosted-a", model: "model-a"}, action: "banned", reason: "probe failed"},
+		{pair: managedModelPair{channelID: 8, channelNm: "hosted-b", model: "model-b"}, action: "banned", reason: "probe failed"},
+		{pair: managedModelPair{channelID: 7, channelNm: "hosted-a", model: "model-c"}, action: "banned", reason: "probe failed"},
+	}
+
+	notifyType, subject, content := buildManagedRootNotification(batch)
+	assert.Equal(t, "managed_banned", notifyType)
+	assert.Contains(t, subject, "2 个渠道的 3 个模型")
+	assert.Contains(t, content, "渠道「hosted-a」（#7）：model-a、model-c")
+	assert.Contains(t, content, "渠道「hosted-b」（#8）：model-b")
+	assert.Less(t, strings.Index(content, "hosted-a"), strings.Index(content, "hosted-b"), "channel order must be stable")
+}
+
+// TestBuildManagedDingTalkCardAggregatesChannelsAndModels proves the user-facing
+// aggregation contract: one action card contains every affected channel and
+// model, with the recommendation section appended only once.
+func TestBuildManagedDingTalkCardAggregatesChannelsAndModels(t *testing.T) {
 	// The card appends the recommendation section, which reads channel abilities;
 	// provision an isolated DB with the tables it touches so the lookup returns an
 	// empty list instead of hitting a nil DB.
@@ -197,16 +228,47 @@ func TestBuildManagedDingTalkCardAggregatesModels(t *testing.T) {
 			state:  &model.ChannelManagedState{ChannelId: 7, ModelName: "model-b"},
 			latest: &model.ChannelMonitorResult{ErrorMessage: "500 upstream"},
 		},
+		{
+			pair:   managedModelPair{channelID: 8, channelNm: "hosted-b", model: "model-c"},
+			action: "banned",
+			state:  &model.ChannelManagedState{ChannelId: 8, ModelName: "model-c"},
+			latest: &model.ChannelMonitorResult{ErrorMessage: "524 timeout"},
+		},
 	}
 
 	title, markdown := buildManagedDingTalkCard(group)
-	assert.Contains(t, title, "model-a")
-	assert.Contains(t, title, "model-b")
-	assert.Contains(t, markdown, "托管渠道封禁")
+	assert.Contains(t, title, "2个渠道 / 3个模型")
+	assert.Contains(t, markdown, "托管渠道批量封禁")
 	assert.Contains(t, markdown, "model-a")
 	assert.Contains(t, markdown, "model-b")
+	assert.Contains(t, markdown, "model-c")
 	assert.Contains(t, markdown, "429 rate limited")
 	assert.Contains(t, markdown, "500 upstream")
-	// The channel is named once, not once per model.
-	assert.Equal(t, 1, strings.Count(markdown, "hosted-a"), "channel is named once for the whole group")
+	assert.Contains(t, markdown, "524 timeout")
+	assert.Equal(t, 1, strings.Count(markdown, "hosted-a"), "channel is named once for all of its models")
+	assert.Equal(t, 1, strings.Count(markdown, "hosted-b"))
+	assert.Equal(t, 1, strings.Count(markdown, "推荐使用模型"), "recommendations are appended once per action batch")
+	assert.Less(t, strings.Index(markdown, "hosted-a"), strings.Index(markdown, "hosted-b"), "channel order must be stable")
+
+	recoveryGroup := []managedFlipEvent{
+		{
+			pair:   managedModelPair{channelID: 7, channelNm: "hosted-a", model: "model-a"},
+			action: "recovered",
+			state:  &model.ChannelManagedState{ChannelId: 7, ModelName: "model-a"},
+		},
+		{
+			pair:   managedModelPair{channelID: 8, channelNm: "hosted-b", model: "model-c"},
+			action: "recovered",
+			state:  &model.ChannelManagedState{ChannelId: 8, ModelName: "model-c"},
+		},
+	}
+
+	recoveryTitle, recoveryMarkdown := buildManagedDingTalkCard(recoveryGroup)
+	assert.Contains(t, recoveryTitle, "2个渠道 / 2个模型")
+	assert.Contains(t, recoveryMarkdown, "托管渠道批量恢复")
+	assert.Contains(t, recoveryMarkdown, "hosted-a")
+	assert.Contains(t, recoveryMarkdown, "hosted-b")
+	assert.Contains(t, recoveryMarkdown, "model-a")
+	assert.Contains(t, recoveryMarkdown, "model-c")
+	assert.Equal(t, 1, strings.Count(recoveryMarkdown, "推荐使用模型"))
 }

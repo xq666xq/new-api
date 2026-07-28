@@ -163,6 +163,74 @@ func ApplyChannelManagedAbilityState(state *ChannelManagedState, enabled *bool, 
 	return nil
 }
 
+// ApplyManualChannelManagedOverrides makes an administrator's channel-level
+// status/priority change immediately authoritative for every model on the
+// affected channels. Existing managed decisions are reset to the same values so
+// the memory-cache overlay cannot keep serving an older per-model ban or speed
+// tier. Management remains enabled: a later probe sweep may ban, recover, or
+// reprioritize the models again.
+func ApplyManualChannelManagedOverrides(channelIds []int, enabled *bool, priority *int64) error {
+	if len(channelIds) == 0 || (enabled == nil && priority == nil) {
+		return nil
+	}
+
+	uniqueIds := make([]int, 0, len(channelIds))
+	seen := make(map[int]struct{}, len(channelIds))
+	for _, channelId := range channelIds {
+		if channelId <= 0 {
+			continue
+		}
+		if _, ok := seen[channelId]; ok {
+			continue
+		}
+		seen[channelId] = struct{}{}
+		uniqueIds = append(uniqueIds, channelId)
+	}
+	if len(uniqueIds) == 0 {
+		return nil
+	}
+
+	now := common.GetTimestamp()
+	return DB.Transaction(func(tx *gorm.DB) error {
+		abilityUpdates := make(map[string]interface{}, 2)
+		managedUpdates := map[string]interface{}{
+			"updated_time": now,
+		}
+		if enabled != nil {
+			abilityUpdates["enabled"] = *enabled
+			managedUpdates["confirm_count"] = 0
+			// Treat the manual action as the new evidence baseline so a stale
+			// probe from before the click cannot immediately undo it. Fresh
+			// scheduled probes may take ownership again normally.
+			managedUpdates["last_confirm_probe_at"] = now
+			if *enabled {
+				managedUpdates["ban_state"] = ManagedBanStateActive
+				managedUpdates["last_recover_at"] = now
+			} else {
+				managedUpdates["ban_state"] = ManagedBanStateBanned
+				managedUpdates["last_ban_at"] = now
+			}
+		}
+		if priority != nil {
+			abilityUpdates["priority"] = *priority
+			// Release the old speed-tier decision. Until the next policy sweep,
+			// selection falls back to the channel's newly selected priority.
+			managedUpdates["priority_managed"] = false
+			managedUpdates["original_priority"] = *priority
+			managedUpdates["managed_priority"] = *priority
+		}
+
+		if err := tx.Model(&Ability{}).
+			Where("channel_id IN ?", uniqueIds).
+			Updates(abilityUpdates).Error; err != nil {
+			return err
+		}
+		return tx.Model(&ChannelManagedState{}).
+			Where("channel_id IN ?", uniqueIds).
+			Updates(managedUpdates).Error
+	})
+}
+
 // DeleteChannelManagedStatesByChannel is an explicit maintenance operation.
 // Turning hosting off intentionally does not call it: the last policy decision
 // remains applied until it is explicitly cleared or replaced by a later policy

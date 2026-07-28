@@ -786,8 +786,18 @@ func DisableTagChannels(c *gin.Context) {
 		})
 		return
 	}
+	channelIds, err := model.GetChannelIdsByTag(channelTag.Tag)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	err = model.DisableChannelByTag(channelTag.Tag)
 	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	disabled := false
+	if err := model.ApplyManualChannelManagedOverrides(channelIds, &disabled, nil); err != nil {
 		common.ApiError(c, err)
 		return
 	}
@@ -812,8 +822,18 @@ func EnableTagChannels(c *gin.Context) {
 		})
 		return
 	}
+	channelIds, err := model.GetChannelIdsByTag(channelTag.Tag)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	err = model.EnableChannelByTag(channelTag.Tag)
 	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	enabled := true
+	if err := model.ApplyManualChannelManagedOverrides(channelIds, &enabled, nil); err != nil {
 		common.ApiError(c, err)
 		return
 	}
@@ -844,6 +864,14 @@ func EditTagChannels(c *gin.Context) {
 			"message": "tag不能为空",
 		})
 		return
+	}
+	var priorityChannelIds []int
+	if channelTag.Priority != nil {
+		priorityChannelIds, err = model.GetChannelIdsByTag(channelTag.Tag)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
 	}
 	if (channelTag.ParamOverride != nil || channelTag.HeaderOverride != nil) &&
 		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSensitiveWrite) {
@@ -876,6 +904,12 @@ func EditTagChannels(c *gin.Context) {
 	if err != nil {
 		common.ApiError(c, err)
 		return
+	}
+	if channelTag.Priority != nil {
+		if err := model.ApplyManualChannelManagedOverrides(priorityChannelIds, nil, channelTag.Priority); err != nil {
+			common.ApiError(c, err)
+			return
+		}
 	}
 	model.InitChannelCache()
 	recordManageAudit(c, "channel.tag_edit", map[string]interface{}{
@@ -1084,6 +1118,13 @@ func UpdateChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	if _, priorityProvided := requestData["priority"]; priorityProvided {
+		priority := channel.GetPriority()
+		if err := model.ApplyManualChannelManagedOverrides([]int{channel.Id}, nil, &priority); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
 	model.InitChannelCache()
 	if proxyChanged {
 		service.InvalidateProxyClient(originProxy)
@@ -1132,9 +1173,12 @@ func UpdateChannelStatus(c *gin.Context) {
 		return
 	}
 	changed := model.UpdateChannelStatus(id, "", req.Status, "manual operation")
-	if changed {
-		model.InitChannelCache()
+	enabled := req.Status == common.ChannelStatusEnabled
+	if err := model.ApplyManualChannelManagedOverrides([]int{id}, &enabled, nil); err != nil {
+		common.ApiError(c, err)
+		return
 	}
+	model.InitChannelCache()
 	recordManageAudit(c, "channel.status_update", map[string]interface{}{
 		"id":      id,
 		"status":  req.Status,
@@ -1153,15 +1197,19 @@ func BatchUpdateChannelStatus(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
 	}
-	changedCount := 0
+	changedIds := make([]int, 0, len(req.Ids))
 	for _, id := range req.Ids {
 		if model.UpdateChannelStatus(id, "", req.Status, "manual batch operation") {
-			changedCount++
+			changedIds = append(changedIds, id)
 		}
 	}
-	if changedCount > 0 {
-		model.InitChannelCache()
+	enabled := req.Status == common.ChannelStatusEnabled
+	if err := model.ApplyManualChannelManagedOverrides(req.Ids, &enabled, nil); err != nil {
+		common.ApiError(c, err)
+		return
 	}
+	model.InitChannelCache()
+	changedCount := len(changedIds)
 	recordManageAudit(c, "channel.status_update_batch", map[string]interface{}{
 		"count":  changedCount,
 		"total":  len(req.Ids),

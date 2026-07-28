@@ -117,7 +117,7 @@ func TestUpdateChannelMonitorSettingPersistsDisabledState(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	originalDB, originalLogDB := model.DB, model.LOG_DB
 	setting := operation_setting.GetChannelMonitorSetting()
-	originalEnabled := setting.Enabled
+	originalSetting := *setting
 	common.OptionMapRWMutex.Lock()
 	originalOptionMap := common.OptionMap
 	common.OptionMap = make(map[string]string)
@@ -128,9 +128,10 @@ func TestUpdateChannelMonitorSettingPersistsDisabledState(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&model.Option{}))
 	model.DB, model.LOG_DB = db, db
+	setting.ProbeConcurrency = 7
 	t.Cleanup(func() {
 		model.DB, model.LOG_DB = originalDB, originalLogDB
-		setting.Enabled = originalEnabled
+		*setting = originalSetting
 		common.OptionMapRWMutex.Lock()
 		common.OptionMap = originalOptionMap
 		common.OptionMapRWMutex.Unlock()
@@ -158,9 +159,13 @@ func TestUpdateChannelMonitorSettingPersistsDisabledState(t *testing.T) {
 	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
 	assert.True(t, response.Success)
 	assert.False(t, response.Data.Enabled)
+	assert.Equal(t, 7, response.Data.ProbeConcurrency)
 	assert.False(t, operation_setting.IsChannelMonitorEnabled())
 
 	var option model.Option
 	require.NoError(t, db.First(&option, "key = ?", "channel_monitor_setting.enabled").Error)
 	assert.Equal(t, "false", option.Value)
+	option = model.Option{}
+	require.NoError(t, db.First(&option, "key = ?", "channel_monitor_setting.probe_concurrency").Error)
+	assert.Equal(t, "7", option.Value)
 }

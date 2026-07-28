@@ -19,24 +19,31 @@ import (
 // ProbeTimeoutSeconds bounds how long a single model probe may run. It is
 // independent of the relay RELAY_TIMEOUT so tightening probe health checks never
 // shortens real forwarding: a probe that exceeds it is cancelled and recorded as
-// a failure, instead of hanging for minutes on a slow upstream and stalling the
-// whole serial sweep. See GetChannelMonitorProbeTimeout for the clamped value.
+// a failure, instead of occupying one bounded-concurrency worker for minutes.
+// ProbeConcurrency bounds how many channel/model probes one monitor task may run
+// at once. Zero means every due probe in the task starts concurrently, keeping
+// the task duration close to one probe timeout. See the getters below for
+// clamped runtime values.
 type ChannelMonitorSetting struct {
 	Enabled             bool   `json:"enabled"`
 	CurfewEnabled       bool   `json:"curfew_enabled"`
 	CurfewStart         string `json:"curfew_start"`
 	CurfewEnd           string `json:"curfew_end"`
 	ProbeTimeoutSeconds int    `json:"probe_timeout_seconds"`
+	ProbeConcurrency    int    `json:"probe_concurrency"`
 }
 
 // Probe timeout bounds. The default keeps a probe from hanging indefinitely while
 // still allowing a slow-but-alive upstream to answer; the floor prevents a
 // too-aggressive value from failing healthy channels, and the ceiling caps how
-// long one probe can stall the serial sweep.
+// long one probe can occupy a batch worker.
 const (
 	MonitorProbeTimeoutDefaultSeconds = 60
 	MonitorProbeTimeoutMinSeconds     = 5
 	MonitorProbeTimeoutMaxSeconds     = 600
+	MonitorProbeConcurrencyDefault    = 0
+	MonitorProbeConcurrencyMin        = 1
+	MonitorProbeConcurrencyMax        = 128
 )
 
 // Monitoring defaults to enabled so upgrades preserve the behavior of existing
@@ -48,6 +55,7 @@ var channelMonitorSetting = ChannelMonitorSetting{
 	CurfewStart:         "23:00",
 	CurfewEnd:           "07:00",
 	ProbeTimeoutSeconds: MonitorProbeTimeoutDefaultSeconds,
+	ProbeConcurrency:    MonitorProbeConcurrencyDefault,
 }
 
 func init() {
@@ -78,6 +86,27 @@ func GetChannelMonitorProbeTimeout() time.Duration {
 		seconds = MonitorProbeTimeoutMaxSeconds
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+// GetChannelMonitorProbeConcurrency returns the bounded number of channel/model
+// probes that one scheduled monitor task may execute simultaneously. Zero means
+// all due probes start concurrently; it is also the default for installations
+// that do not have this setting yet.
+func GetChannelMonitorProbeConcurrency() int {
+	concurrency := channelMonitorSetting.ProbeConcurrency
+	if concurrency < 0 {
+		concurrency = MonitorProbeConcurrencyDefault
+	}
+	if concurrency == 0 {
+		return 0
+	}
+	if concurrency < MonitorProbeConcurrencyMin {
+		concurrency = MonitorProbeConcurrencyMin
+	}
+	if concurrency > MonitorProbeConcurrencyMax {
+		concurrency = MonitorProbeConcurrencyMax
+	}
+	return concurrency
 }
 
 // parseCurfewMinutes parses an "HH:MM" 24-hour string into minutes-of-day

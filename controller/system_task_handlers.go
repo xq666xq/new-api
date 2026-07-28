@@ -12,6 +12,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"golang.org/x/sync/errgroup"
 )
 
 // RegisterScheduledSystemTasks wires the periodic channel test, upstream model
@@ -60,6 +61,59 @@ type channelMonitorTaskResult struct {
 	Checks   int `json:"checks"`
 	Success  int `json:"success"`
 	Failed   int `json:"failed"`
+}
+
+type channelMonitorProbeJob struct {
+	channel         *model.Channel
+	channelLoadErr  error
+	config          *model.ChannelMonitorConfig
+	testUserID      int
+	modelName       string
+	questionID      int
+	questionContent string
+}
+
+type channelMonitorProbeExecutor func(context.Context, channelMonitorProbeJob) (*model.ChannelMonitorResult, error)
+
+// executeChannelMonitorProbeBatch runs channel/model probes with bounded
+// concurrency. A queued probe receives no probe timeout until its worker starts
+// executing it, so waiting for a slot cannot turn an unstarted probe into a
+// timeout failure. Results keep the same order as jobs for deterministic task
+// summaries and tests.
+func executeChannelMonitorProbeBatch(
+	ctx context.Context,
+	jobs []channelMonitorProbeJob,
+	concurrency int,
+	execute channelMonitorProbeExecutor,
+) ([]*model.ChannelMonitorResult, error) {
+	results := make([]*model.ChannelMonitorResult, len(jobs))
+	if len(jobs) == 0 {
+		return results, nil
+	}
+	if concurrency <= 0 {
+		concurrency = len(jobs)
+	}
+	if concurrency > len(jobs) {
+		concurrency = len(jobs)
+	}
+
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(concurrency)
+	for index := range jobs {
+		index := index
+		group.Go(func() error {
+			if err := groupCtx.Err(); err != nil {
+				return err
+			}
+			result, err := execute(groupCtx, jobs[index])
+			if err != nil {
+				return err
+			}
+			results[index] = result
+			return nil
+		})
+	}
+	return results, group.Wait()
 }
 
 func selectMonitorQuestion(questions []*model.MonitorQuestion) (int, string) {
@@ -226,6 +280,7 @@ func runChannelMonitorTask(ctx context.Context) (channelMonitorTaskResult, error
 		return summary, err
 	}
 	finishedAtByChannel := make(map[int]int64, len(configs))
+	jobs := make([]channelMonitorProbeJob, 0)
 	for _, config := range configs {
 		if !operation_setting.IsChannelMonitorEnabled() {
 			return summary, nil
@@ -243,36 +298,54 @@ func runChannelMonitorTask(ctx context.Context) (channelMonitorTaskResult, error
 		channel, channelErr := model.GetChannelById(config.ChannelId, true)
 		summary.Channels++
 		for _, modelName := range models {
-			if !operation_setting.IsChannelMonitorEnabled() {
-				return summary, nil
-			}
-			if err := ctx.Err(); err != nil {
-				return summary, err
-			}
 			questionId, questionContent := selectMonitorQuestion(questions)
-			record, err := executeChannelMonitorProbe(
-				ctx,
-				channel,
-				channelErr,
-				config,
-				testUserID,
-				modelName,
-				questionId,
-				questionContent,
+			jobs = append(jobs, channelMonitorProbeJob{
+				channel:         channel,
+				channelLoadErr:  channelErr,
+				config:          config,
+				testUserID:      testUserID,
+				modelName:       modelName,
+				questionID:      questionId,
+				questionContent: questionContent,
+			})
+		}
+	}
+
+	records, probeErr := executeChannelMonitorProbeBatch(
+		ctx,
+		jobs,
+		operation_setting.GetChannelMonitorProbeConcurrency(),
+		func(probeCtx context.Context, job channelMonitorProbeJob) (*model.ChannelMonitorResult, error) {
+			return executeChannelMonitorProbe(
+				probeCtx,
+				job.channel,
+				job.channelLoadErr,
+				job.config,
+				job.testUserID,
+				job.modelName,
+				job.questionID,
+				job.questionContent,
 				model.ChannelMonitorTriggerScheduled,
 				nil,
 			)
-			if err != nil {
-				return summary, err
-			}
-			summary.Checks++
-			if record.Success {
-				summary.Success++
-			} else {
-				summary.Failed++
-			}
+		},
+	)
+	for _, record := range records {
+		if record == nil {
+			continue
 		}
-		finishedAtByChannel[config.ChannelId] = common.GetTimestamp()
+		summary.Checks++
+		if record.Success {
+			summary.Success++
+		} else {
+			summary.Failed++
+		}
+		if record.CheckedAt > finishedAtByChannel[record.ChannelId] {
+			finishedAtByChannel[record.ChannelId] = record.CheckedAt
+		}
+	}
+	if probeErr != nil {
+		return summary, probeErr
 	}
 	// Apply the channel-managed policy once the whole sweep is done: the speed
 	// stage ranks channels against each other, so it needs every managed channel's

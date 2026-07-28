@@ -723,6 +723,9 @@ type channelMonitorSettingUpdateRequest struct {
 	// ProbeTimeoutSeconds bounds a single probe; optional so an old client omitting
 	// it keeps the stored value. Clamped to the setting's safe range before saving.
 	ProbeTimeoutSeconds *int `json:"probe_timeout_seconds"`
+	// ProbeConcurrency bounds the number of channel/model probes in flight for one
+	// scheduled task. Optional so older clients preserve the stored value.
+	ProbeConcurrency *int `json:"probe_concurrency"`
 }
 
 // validCurfewTime reports whether a string is a well-formed 24-hour "HH:MM" time,
@@ -789,6 +792,19 @@ func UpdateChannelMonitorSetting(c *gin.Context) {
 		probeTimeout = operation_setting.MonitorProbeTimeoutMaxSeconds
 	}
 	values["channel_monitor_setting.probe_timeout_seconds"] = strconv.Itoa(probeTimeout)
+	probeConcurrency := operation_setting.GetChannelMonitorProbeConcurrency()
+	if req.ProbeConcurrency != nil {
+		probeConcurrency = *req.ProbeConcurrency
+	}
+	if probeConcurrency < 0 {
+		probeConcurrency = operation_setting.MonitorProbeConcurrencyDefault
+	} else if probeConcurrency > 0 && probeConcurrency < operation_setting.MonitorProbeConcurrencyMin {
+		probeConcurrency = operation_setting.MonitorProbeConcurrencyMin
+	}
+	if probeConcurrency > operation_setting.MonitorProbeConcurrencyMax {
+		probeConcurrency = operation_setting.MonitorProbeConcurrencyMax
+	}
+	values["channel_monitor_setting.probe_concurrency"] = strconv.Itoa(probeConcurrency)
 	if err := model.UpdateOptionsBulk(values); err != nil {
 		common.ApiError(c, err)
 		return

@@ -24,7 +24,10 @@ func newChannelMonitorTestDB(t *testing.T) *gorm.DB {
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
 	DB, LOG_DB = db, db
-	require.NoError(t, db.AutoMigrate(&Channel{}, &ChannelMonitorConfig{}, &ChannelMonitorResult{}, &MonitorQuestion{}, &Option{}, &Log{}))
+	require.NoError(t, db.AutoMigrate(
+		&Channel{}, &Ability{}, &ChannelMonitorConfig{}, &ChannelMonitorResult{},
+		&ChannelManagedState{}, &ChannelRecommendation{}, &MonitorQuestion{}, &Option{}, &Log{},
+	))
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
 	t.Cleanup(func() {

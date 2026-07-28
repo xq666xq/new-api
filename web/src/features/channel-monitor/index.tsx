@@ -256,6 +256,8 @@ function isValidClock(value: string): boolean {
 // validates against these so an out-of-range value is caught before the request.
 const MONITOR_PROBE_TIMEOUT_MIN = 5
 const MONITOR_PROBE_TIMEOUT_MAX = 600
+const MONITOR_PROBE_CONCURRENCY_MIN = 0
+const MONITOR_PROBE_CONCURRENCY_MAX = 128
 
 /**
  * Curfew control: a popover holding the daily quiet-window switch and its
@@ -283,6 +285,9 @@ function CurfewControl({
   // Probe timeout is edited as a string so an in-progress edit (empty field) is
   // allowed; it is parsed and range-checked before the save button enables.
   const [timeout, setTimeout] = useState(String(setting.probeTimeoutSeconds))
+  const [concurrency, setConcurrency] = useState(
+    String(setting.probeConcurrency)
+  )
 
   // Re-sync the staged draft with the server value whenever the popover opens or
   // the persisted setting changes, so a discarded edit does not linger.
@@ -292,6 +297,7 @@ function CurfewControl({
       setStart(setting.curfewStart)
       setEnd(setting.curfewEnd)
       setTimeout(String(setting.probeTimeoutSeconds))
+      setConcurrency(String(setting.probeConcurrency))
     }
   }, [
     open,
@@ -299,6 +305,7 @@ function CurfewControl({
     setting.curfewStart,
     setting.curfewEnd,
     setting.probeTimeoutSeconds,
+    setting.probeConcurrency,
   ])
 
   const timesValid = isValidClock(start) && isValidClock(end)
@@ -307,7 +314,12 @@ function CurfewControl({
     Number.isInteger(timeoutValue) &&
     timeoutValue >= MONITOR_PROBE_TIMEOUT_MIN &&
     timeoutValue <= MONITOR_PROBE_TIMEOUT_MAX
-  const canSave = timesValid && timeoutValid && !saving
+  const concurrencyValue = Number(concurrency)
+  const concurrencyValid =
+    Number.isInteger(concurrencyValue) &&
+    concurrencyValue >= MONITOR_PROBE_CONCURRENCY_MIN &&
+    concurrencyValue <= MONITOR_PROBE_CONCURRENCY_MAX
+  const canSave = timesValid && timeoutValid && concurrencyValid && !saving
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -405,6 +417,33 @@ function CurfewControl({
             </p>
           )}
         </div>
+        <div className='space-y-1.5'>
+          <Label htmlFor='probe-concurrency' className='text-sm'>
+            {t('Concurrent probes')}
+          </Label>
+          <Input
+            id='probe-concurrency'
+            type='number'
+            min={MONITOR_PROBE_CONCURRENCY_MIN}
+            max={MONITOR_PROBE_CONCURRENCY_MAX}
+            value={concurrency}
+            onChange={(e) => setConcurrency(e.target.value)}
+          />
+          <p className='text-muted-foreground text-xs'>
+            {t(
+              'Maximum channel/model probes running at once. A queued probe starts its own timeout only when execution begins.'
+            )}{' '}
+            {t('Set to 0 to start every due probe at once.')}
+          </p>
+          {!concurrencyValid && (
+            <p className='text-destructive text-xs'>
+              {t('Enter a whole number between {{min}} and {{max}}.', {
+                min: MONITOR_PROBE_CONCURRENCY_MIN,
+                max: MONITOR_PROBE_CONCURRENCY_MAX,
+              })}
+            </p>
+          )}
+        </div>
         <div className='flex justify-end gap-2'>
           <Button
             type='button'
@@ -425,6 +464,7 @@ function CurfewControl({
                 curfewStart: start,
                 curfewEnd: end,
                 probeTimeoutSeconds: timeoutValue,
+                probeConcurrency: concurrencyValue,
               })
               setOpen(false)
             }}
@@ -509,6 +549,7 @@ export function ChannelMonitor() {
     curfewStart: '23:00',
     curfewEnd: '07:00',
     probeTimeoutSeconds: 60,
+    probeConcurrency: 0,
   }
 
   const toggleMasterSwitch = (enabled: boolean) => {

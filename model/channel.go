@@ -376,6 +376,12 @@ func GetChannelsByTag(tag string, idSort bool, selectAll bool, sortOptions ...Ch
 	return channels, err
 }
 
+func GetChannelIdsByTag(tag string) ([]int, error) {
+	var channelIds []int
+	err := DB.Model(&Channel{}).Where("tag = ?", tag).Pluck("id", &channelIds).Error
+	return channelIds, err
+}
+
 func SearchChannels(keyword string, group string, model string, idSort bool, sortOptions ...ChannelSortOptions) ([]*Channel, error) {
 	var channels []*Channel
 	modelsCol := "`models`"

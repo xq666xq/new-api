@@ -116,6 +116,8 @@ export interface ChannelMonitorSetting {
    * forwarding. Clamped server-side to a safe range.
    */
   probeTimeoutSeconds: number
+  /** Maximum number of channel/model probes one scheduled task runs at once. */
+  probeConcurrency: number
 }
 
 /** Final upstream HTTP exchange captured only for one manual probe response. */

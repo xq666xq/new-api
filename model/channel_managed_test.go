@@ -194,6 +194,81 @@ func TestApplyChannelManagedAbilityStateIsAtomic(t *testing.T) {
 	assert.True(t, modelB.Enabled, "ability update must roll back when managed-state persistence fails")
 }
 
+func TestApplyManualChannelManagedOverridesSynchronizesModels(t *testing.T) {
+	db := newManagedTestDB(t)
+	require.NoError(t, db.Create(&[]Ability{
+		{Group: "default", Model: "model-a", ChannelId: 21, Enabled: false, Priority: ptrInt64(7)},
+		{Group: "vip", Model: "model-a", ChannelId: 21, Enabled: false, Priority: ptrInt64(7)},
+		{Group: "default", Model: "model-b", ChannelId: 21, Enabled: true, Priority: ptrInt64(5)},
+		{Group: "default", Model: "model-c", ChannelId: 22, Enabled: false, Priority: ptrInt64(3)},
+	}).Error)
+	require.NoError(t, db.Create(&[]ChannelManagedState{
+		{
+			ChannelId: 21, ModelName: "model-a", BanState: ManagedBanStateBanned,
+			ConfirmCount: 2, LastConfirmProbeAt: 100, PriorityManaged: true,
+			OriginalPriority: 1, ManagedPriority: 7,
+		},
+		{
+			ChannelId: 21, ModelName: "model-b", BanState: ManagedBanStateActive,
+			ConfirmCount: 1, LastConfirmProbeAt: 200, PriorityManaged: true,
+			OriginalPriority: 2, ManagedPriority: 5,
+		},
+		{
+			ChannelId: 22, ModelName: "model-c", BanState: ManagedBanStateBanned,
+			PriorityManaged: true, OriginalPriority: 3, ManagedPriority: 3,
+		},
+	}).Error)
+
+	enabled := true
+	priority := int64(9)
+	require.NoError(t, ApplyManualChannelManagedOverrides([]int{21}, &enabled, &priority))
+
+	var abilities []Ability
+	require.NoError(t, db.Where("channel_id = ?", 21).Order("model, "+commonGroupCol).Find(&abilities).Error)
+	require.Len(t, abilities, 3)
+	for _, ability := range abilities {
+		assert.True(t, ability.Enabled)
+		require.NotNil(t, ability.Priority)
+		assert.Equal(t, priority, *ability.Priority)
+	}
+
+	states, err := GetChannelManagedStatesByChannel(21)
+	require.NoError(t, err)
+	require.Len(t, states, 2)
+	for _, state := range states {
+		assert.Equal(t, ManagedBanStateActive, state.BanState)
+		assert.Zero(t, state.ConfirmCount)
+		assert.Positive(t, state.LastConfirmProbeAt)
+		assert.Positive(t, state.LastRecoverAt)
+		assert.False(t, state.PriorityManaged)
+		assert.Equal(t, priority, state.OriginalPriority)
+		assert.Equal(t, priority, state.ManagedPriority)
+	}
+
+	disabled := false
+	require.NoError(t, ApplyManualChannelManagedOverrides([]int{21}, &disabled, nil))
+	require.NoError(t, db.Where("channel_id = ?", 21).Order("model, "+commonGroupCol).Find(&abilities).Error)
+	for _, ability := range abilities {
+		assert.False(t, ability.Enabled)
+	}
+	states, err = GetChannelManagedStatesByChannel(21)
+	require.NoError(t, err)
+	for _, state := range states {
+		assert.Equal(t, ManagedBanStateBanned, state.BanState)
+		assert.Positive(t, state.LastBanAt)
+	}
+
+	var untouched Ability
+	require.NoError(t, db.Where("channel_id = ?", 22).First(&untouched).Error)
+	assert.False(t, untouched.Enabled)
+	require.NotNil(t, untouched.Priority)
+	assert.Equal(t, int64(3), *untouched.Priority)
+	untouchedState, err := GetChannelManagedState(22, "model-c")
+	require.NoError(t, err)
+	require.NotNil(t, untouchedState)
+	assert.True(t, untouchedState.PriorityManaged)
+}
+
 func TestIsChannelManagedDoesNotDependOnProbeEnabled(t *testing.T) {
 	db := newManagedTestDB(t)
 	require.NoError(t, db.Create(&[]ChannelMonitorConfig{

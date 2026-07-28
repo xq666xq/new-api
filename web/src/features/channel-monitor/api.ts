@@ -314,15 +314,19 @@ type RawMonitorSetting = {
   curfew_start: string
   curfew_end: string
   probe_timeout_seconds: number
+  probe_concurrency: number
 }
 
-function toMonitorSetting(raw: RawMonitorSetting | null): ChannelMonitorSetting {
+function toMonitorSetting(
+  raw: RawMonitorSetting | null
+): ChannelMonitorSetting {
   return {
     enabled: raw?.enabled ?? true,
     curfewEnabled: raw?.curfew_enabled ?? false,
     curfewStart: raw?.curfew_start || '23:00',
     curfewEnd: raw?.curfew_end || '07:00',
     probeTimeoutSeconds: raw?.probe_timeout_seconds || 60,
+    probeConcurrency: raw?.probe_concurrency ?? 0,
   }
 }
 
@@ -346,6 +350,7 @@ export async function updateChannelMonitorSetting(
       curfew_start: setting.curfewStart,
       curfew_end: setting.curfewEnd,
       probe_timeout_seconds: setting.probeTimeoutSeconds,
+      probe_concurrency: setting.probeConcurrency,
     }
   )
   return toMonitorSetting(res.data?.data ?? null)

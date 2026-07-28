@@ -110,6 +110,7 @@ import {
   SecureVerificationDialog,
   useSecureVerification,
 } from '@/features/auth/secure-verification'
+import { channelStatusQueryKeys } from '@/features/channel-status/query-keys'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { useHiddenClickUnlock } from '@/hooks/use-hidden-click-unlock'
 import {
@@ -1540,6 +1541,9 @@ export function ChannelMutateDrawer({
   // Handle successful submission
   const handleSuccess = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+    queryClient.invalidateQueries({
+      queryKey: channelStatusQueryKeys.all,
+    })
     if (channelId) {
       queryClient.invalidateQueries({
         queryKey: channelsQueryKeys.detail(channelId),

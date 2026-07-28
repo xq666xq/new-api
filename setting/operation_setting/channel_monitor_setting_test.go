@@ -11,6 +11,30 @@ func TestChannelMonitorSettingDefaultsEnabled(t *testing.T) {
 	assert.True(t, GetChannelMonitorSetting().Enabled)
 }
 
+func TestGetChannelMonitorProbeConcurrencyClampsRuntimeValue(t *testing.T) {
+	original := channelMonitorSetting
+	t.Cleanup(func() { channelMonitorSetting = original })
+
+	tests := []struct {
+		name  string
+		value int
+		want  int
+	}{
+		{name: "zero starts all probes", value: 0, want: 0},
+		{name: "negative uses default", value: -1, want: MonitorProbeConcurrencyDefault},
+		{name: "minimum is preserved", value: MonitorProbeConcurrencyMin, want: MonitorProbeConcurrencyMin},
+		{name: "configured value is preserved", value: 8, want: 8},
+		{name: "oversized value is clamped", value: MonitorProbeConcurrencyMax + 1, want: MonitorProbeConcurrencyMax},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			channelMonitorSetting.ProbeConcurrency = test.value
+			assert.Equal(t, test.want, GetChannelMonitorProbeConcurrency())
+		})
+	}
+}
+
 // clockAt builds a local time at the given hour:minute; the date is irrelevant
 // because the curfew check only reads hour/minute.
 func clockAt(hour, minute int) time.Time {

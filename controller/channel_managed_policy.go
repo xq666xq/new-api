@@ -95,10 +95,9 @@ type managedModelPair struct {
 }
 
 // managedFlipEvent records one ban/recover flip so the ban stage can defer
-// notification and aggregate every flip of the same (channel, action) into a
-// single alert. A channel's models usually rise and fall together, so a per-model
-// notification would fan out N near-identical cards for one incident; grouping
-// them keeps one card per channel per action (e.g. "封禁: A、B" + "恢复: C").
+// notification and aggregate every flip from the same policy sweep by action.
+// A shared upstream can make many channels and models rise or fall together;
+// batching keeps the whole sweep to at most one ban alert and one recovery alert.
 type managedFlipEvent struct {
 	pair   managedModelPair
 	action string // "banned" or "recovered"
@@ -146,9 +145,9 @@ func collectManagedPairs(configs []*model.ChannelMonitorConfig) []managedModelPa
 
 // applyManagedBanStage runs the circuit breaker for every managed (channel,
 // model) pair and returns whether any ability enable/disable was applied. Flip
-// notifications are deferred and aggregated per (channel, action) so a channel
-// whose models rise or fall together produces one card per action instead of one
-// per model.
+// notifications are deferred and aggregated by action across the whole sweep so
+// simultaneous failures or recoveries produce one card instead of one per model
+// or channel.
 func applyManagedBanStage(configs []*model.ChannelMonitorConfig, setting *operation_setting.ManagedPolicySetting) bool {
 	pairs := collectManagedPairs(configs)
 	events := make([]managedFlipEvent, 0)
@@ -253,7 +252,7 @@ func applyBanForPair(pair managedModelPair, setting *operation_setting.ManagedPo
 
 	// Threshold reached: flip the stable state and apply it to the ability rows.
 	// The flip is reported back to the caller as a managedFlipEvent so it can be
-	// aggregated with the other flips in this sweep and notified once per channel.
+	// aggregated with every same-action flip in this sweep.
 	now := common.GetTimestamp()
 	if stableIsActive {
 		// active -> banned: disable this model on this channel.
@@ -455,170 +454,201 @@ func applyManagedPriority(pair managedModelPair, priority int64) bool {
 	return true
 }
 
-// notifyManagedFlips aggregates the ban/recover flips from one policy sweep and
-// sends one notification per (channel, action) group instead of one per model.
-// A managed channel's models usually rise and fall together, so a per-model alert
-// fanned out N near-identical cards for a single incident; grouping collapses them
-// into one card per action that lists every affected model (e.g. one 封禁 card for
-// models A and B, one 恢复 card for model C). Groups keep first-seen order so the
-// output is stable across sweeps.
-func notifyManagedFlips(events []managedFlipEvent) {
-	if len(events) == 0 {
-		return
-	}
-	type groupKey struct {
-		channelID int
-		action    string
-	}
-	groups := make(map[groupKey][]managedFlipEvent)
-	order := make([]groupKey, 0)
+// managedFlipChannelGroup keeps the affected models of one channel together in
+// first-seen order for notification rendering.
+type managedFlipChannelGroup struct {
+	channelID int
+	channelNm string
+	events    []managedFlipEvent
+}
+
+// groupManagedFlipsByAction partitions one policy sweep into stable action
+// batches. The caller consequently emits at most one ban notification and one
+// recovery notification for the whole sweep.
+func groupManagedFlipsByAction(events []managedFlipEvent) [][]managedFlipEvent {
+	groups := make(map[string][]managedFlipEvent)
+	order := make([]string, 0, 2)
 	for _, event := range events {
-		key := groupKey{channelID: event.pair.channelID, action: event.action}
-		if _, ok := groups[key]; !ok {
-			order = append(order, key)
+		if _, ok := groups[event.action]; !ok {
+			order = append(order, event.action)
 		}
-		groups[key] = append(groups[key], event)
+		groups[event.action] = append(groups[event.action], event)
 	}
-	for _, key := range order {
-		notifyManagedFlipGroup(groups[key])
+
+	result := make([][]managedFlipEvent, 0, len(order))
+	for _, action := range order {
+		result = append(result, groups[action])
+	}
+	return result
+}
+
+// groupManagedFlipsByChannel prepares one action batch for display, preserving
+// the order channels and their models first appeared in the sweep.
+func groupManagedFlipsByChannel(events []managedFlipEvent) []managedFlipChannelGroup {
+	groups := make(map[int]int)
+	result := make([]managedFlipChannelGroup, 0)
+	for _, event := range events {
+		index, ok := groups[event.pair.channelID]
+		if !ok {
+			index = len(result)
+			groups[event.pair.channelID] = index
+			result = append(result, managedFlipChannelGroup{
+				channelID: event.pair.channelID,
+				channelNm: event.pair.channelNm,
+			})
+		}
+		result[index].events = append(result[index].events, event)
+	}
+	return result
+}
+
+// notifyManagedFlips aggregates all ban/recover flips from one policy sweep by
+// action. Simultaneous failures across channels therefore produce one ban alert,
+// while simultaneous recoveries produce one separate recovery alert.
+func notifyManagedFlips(events []managedFlipEvent) {
+	for _, batch := range groupManagedFlipsByAction(events) {
+		notifyManagedFlipBatch(batch)
 	}
 }
 
-// notifyManagedFlipGroup alerts operators about one channel's ban or recover flips
-// that share the same action. The group is non-empty and every event in it shares
-// the same channel and action. It fans out to two best-effort channels (a failure
-// is logged, never propagated, so notification never disrupts the policy sweep):
-//
-//   - the existing root-user notification (email/webhook/bark/gotify), for parity
-//     with channel disable/enable alerts, and
-//   - an optional DingTalk action card, when configured in the managed policy.
-func notifyManagedFlipGroup(group []managedFlipEvent) {
-	first := group[0]
-	channelNm := first.pair.channelNm
-	channelID := first.pair.channelID
-	action := first.action
-
-	models := make([]string, 0, len(group))
-	for _, event := range group {
-		models = append(models, event.pair.model)
-	}
-	modelList := strings.Join(models, "、")
-
-	var subject, content string
-	switch action {
-	case "banned":
-		subject = fmt.Sprintf("托管策略：渠道「%s」（#%d）已封禁 %d 个模型", channelNm, channelID, len(models))
-		content = fmt.Sprintf("托管策略封禁了渠道「%s」（#%d）的模型 %s，原因：%s", channelNm, channelID, modelList, first.reason)
-	case "recovered":
-		subject = fmt.Sprintf("托管策略：渠道「%s」（#%d）已恢复 %d 个模型", channelNm, channelID, len(models))
-		content = fmt.Sprintf("托管策略恢复了渠道「%s」（#%d）的模型 %s，原因：%s", channelNm, channelID, modelList, first.reason)
-	default:
+// notifyManagedFlipBatch fans one action batch out to the existing root-user
+// notification channels and the optional DingTalk action card. Both paths are
+// best-effort and never interrupt the policy sweep.
+func notifyManagedFlipBatch(batch []managedFlipEvent) {
+	notifyType, subject, content := buildManagedRootNotification(batch)
+	if notifyType == "" {
 		return
 	}
-	// One notification key per (channel, action) so the limiter buckets a whole
-	// incident together instead of once per model.
-	service.NotifyRootUser(fmt.Sprintf("managed_%d_%s", channelID, action), subject, content)
-	notifyManagedFlipGroupDingTalk(group)
+	service.NotifyRootUser(notifyType, subject, content)
+	notifyManagedFlipBatchDingTalk(batch)
 }
 
-// notifyManagedFlipGroupDingTalk sends the aggregated ban/recover DingTalk action
-// card for one (channel, action) group when the integration is enabled. It runs
-// the network call in a goroutine so a slow DingTalk endpoint never stalls the 15s
-// policy sweep, and swallows all errors into the log (best-effort, like every
-// other notification path).
-func notifyManagedFlipGroupDingTalk(group []managedFlipEvent) {
+// buildManagedRootNotification composes the non-DingTalk notification for one
+// action batch, listing every affected channel and its models.
+func buildManagedRootNotification(batch []managedFlipEvent) (string, string, string) {
+	if len(batch) == 0 {
+		return "", "", ""
+	}
+
+	channelGroups := groupManagedFlipsByChannel(batch)
+	var actionLabel, notifyType string
+	switch batch[0].action {
+	case "banned":
+		actionLabel = "封禁"
+		notifyType = "managed_banned"
+	case "recovered":
+		actionLabel = "恢复"
+		notifyType = "managed_recovered"
+	default:
+		return "", "", ""
+	}
+
+	subject := fmt.Sprintf("托管策略：批量%s %d 个渠道的 %d 个模型", actionLabel, len(channelGroups), len(batch))
+	var content strings.Builder
+	content.WriteString(fmt.Sprintf("托管策略本轮%s了 %d 个渠道的 %d 个模型，原因：%s", actionLabel, len(channelGroups), len(batch), batch[0].reason))
+	for _, channelGroup := range channelGroups {
+		models := make([]string, 0, len(channelGroup.events))
+		for _, event := range channelGroup.events {
+			models = append(models, event.pair.model)
+		}
+		content.WriteString(fmt.Sprintf("\n- 渠道「%s」（#%d）：%s", channelGroup.channelNm, channelGroup.channelID, strings.Join(models, "、")))
+	}
+	return notifyType, subject, content.String()
+}
+
+// notifyManagedFlipBatchDingTalk sends one action batch when the DingTalk
+// integration is enabled. The network call runs asynchronously so a slow
+// endpoint never stalls the policy sweep.
+func notifyManagedFlipBatchDingTalk(batch []managedFlipEvent) {
 	setting := operation_setting.GetManagedPolicySetting()
 	if !setting.DingTalkEnabled || strings.TrimSpace(setting.DingTalkWebhookURL) == "" {
 		return
 	}
-	title, markdown := buildManagedDingTalkCard(group)
+	title, markdown := buildManagedDingTalkCard(batch)
 	if title == "" {
 		return
 	}
 	webhook := setting.DingTalkWebhookURL
 	secret := setting.DingTalkSecret
-	channelID := group[0].pair.channelID
-	action := group[0].action
+	action := batch[0].action
+	channelCount := len(groupManagedFlipsByChannel(batch))
+	modelCount := len(batch)
 	go func() {
 		// No jump button: the card is intentionally self-contained.
 		if err := service.SendDingTalkActionCard(webhook, secret, title, markdown, ""); err != nil {
-			common.SysError(fmt.Sprintf("managed policy: dingtalk notify failed channel=%d action=%s: %v", channelID, action, err))
+			common.SysError(fmt.Sprintf("managed policy: dingtalk notify failed action=%s channels=%d models=%d: %v", action, channelCount, modelCount, err))
 		}
 	}()
 }
 
-// buildManagedDingTalkCard composes the aggregated action card title and markdown
-// body for one (channel, action) group. The channel is named once and every
-// affected model is listed with its own detail block: the ban card shows each
-// model's time-since-last-recover and triggering probe error; the recover card
-// shows each model's time-since-last-ban plus recent mean first-token and latency
-// (with graceful "暂无数据" fallbacks). The recommendation section is appended once
-// at the end. Returns ("", "") for an unknown action so the caller skips sending.
-func buildManagedDingTalkCard(group []managedFlipEvent) (string, string) {
-	if len(group) == 0 {
+// buildManagedDingTalkCard composes one action card for every affected channel
+// and model in a policy sweep. Channels are rendered as sections, models as
+// detail blocks, and the recommendation section is appended only once.
+func buildManagedDingTalkCard(batch []managedFlipEvent) (string, string) {
+	if len(batch) == 0 {
 		return "", ""
 	}
 	now := common.GetTimestamp()
-	first := group[0]
+	first := batch[0]
 	action := first.action
-	// DingTalk markdown supports <font color>; colorize the channel name so
-	// operators can spot the affected channel at a glance.
-	channelName := fmt.Sprintf("<font color=\"#1677ff\">**%s**</font>", first.pair.channelNm)
-	channelLabel := fmt.Sprintf("渠道 %s（#%d）", channelName, first.pair.channelID)
-
-	models := make([]string, 0, len(group))
-	for _, event := range group {
-		models = append(models, event.pair.model)
-	}
-	modelSummary := truncateManagedText(strings.Join(models, "、"), 40)
+	channelGroups := groupManagedFlipsByChannel(batch)
+	batchSummary := fmt.Sprintf("%d个渠道 / %d个模型", len(channelGroups), len(batch))
 
 	switch action {
 	case "banned":
-		title := fmt.Sprintf("🔴 模型封禁 · %s", modelSummary)
+		title := fmt.Sprintf("🔴 托管渠道批量封禁 · %s", batchSummary)
 		var b strings.Builder
-		b.WriteString("## 🔴 托管渠道封禁\n\n")
-		b.WriteString(fmt.Sprintf("%s\n\n", channelLabel))
-		for _, event := range group {
-			modelName := fmt.Sprintf("<font color=\"#f5222d\">**%s**</font>", event.pair.model)
-			b.WriteString(fmt.Sprintf("**🔻 %s**\n\n", modelName))
-			if event.state != nil && event.state.LastRecoverAt > 0 {
-				b.WriteString(fmt.Sprintf("- **距上次恢复**：%s\n", humanizeManagedDuration(now-event.state.LastRecoverAt)))
-			} else {
-				b.WriteString("- **距上次恢复**：暂无记录\n")
+		b.WriteString("## 🔴 托管渠道批量封禁\n\n")
+		b.WriteString(fmt.Sprintf("**本轮影响**：%s\n\n", batchSummary))
+		for _, channelGroup := range channelGroups {
+			channelName := fmt.Sprintf("<font color=\"#1677ff\">**%s**</font>", channelGroup.channelNm)
+			b.WriteString(fmt.Sprintf("### 渠道 %s（#%d）\n\n", channelName, channelGroup.channelID))
+			for _, event := range channelGroup.events {
+				modelName := fmt.Sprintf("<font color=\"#f5222d\">**%s**</font>", event.pair.model)
+				b.WriteString(fmt.Sprintf("**🔻 %s**\n\n", modelName))
+				if event.state != nil && event.state.LastRecoverAt > 0 {
+					b.WriteString(fmt.Sprintf("- **距上次恢复**：%s\n", humanizeManagedDuration(now-event.state.LastRecoverAt)))
+				} else {
+					b.WriteString("- **距上次恢复**：暂无记录\n")
+				}
+				errMsg := "无"
+				if event.latest != nil && strings.TrimSpace(event.latest.ErrorMessage) != "" {
+					errMsg = truncateManagedText(strings.TrimSpace(event.latest.ErrorMessage), 300)
+				}
+				b.WriteString(fmt.Sprintf("- **最后错误**：%s\n\n", errMsg))
 			}
-			errMsg := "无"
-			if event.latest != nil && strings.TrimSpace(event.latest.ErrorMessage) != "" {
-				errMsg = truncateManagedText(strings.TrimSpace(event.latest.ErrorMessage), 300)
-			}
-			b.WriteString(fmt.Sprintf("- **最后错误**：%s\n\n", errMsg))
 		}
 		appendRecommendationSection(&b)
 		return title, b.String()
 	case "recovered":
-		title := fmt.Sprintf("🟢 模型恢复 · %s", modelSummary)
+		title := fmt.Sprintf("🟢 托管渠道批量恢复 · %s", batchSummary)
 		window := operation_setting.GetManagedPolicySetting().SpeedWindow
 		var b strings.Builder
-		b.WriteString("## 🟢 托管渠道恢复\n\n")
-		b.WriteString(fmt.Sprintf("%s\n\n", channelLabel))
-		for _, event := range group {
-			modelName := fmt.Sprintf("<font color=\"#52c41a\">**%s**</font>", event.pair.model)
-			b.WriteString(fmt.Sprintf("**🔺 %s**\n\n", modelName))
-			if event.state != nil && event.state.LastBanAt > 0 {
-				b.WriteString(fmt.Sprintf("- **距上次封禁**：%s\n", humanizeManagedDuration(now-event.state.LastBanAt)))
-			} else {
-				b.WriteString("- **距上次封禁**：暂无记录\n")
-			}
-			ttftMean, ttftCount, err := model.GetRecentTtftMean(event.pair.channelID, event.pair.model, window)
-			if err == nil && ttftCount > 0 {
-				b.WriteString(fmt.Sprintf("- **平均首字**：%s（近 %d 次）\n", formatManagedMs(ttftMean), ttftCount))
-			} else {
-				b.WriteString("- **平均首字**：暂无数据\n")
-			}
-			latencyMean, latencyCount, err := model.GetRecentLatencyMean(event.pair.channelID, event.pair.model, window)
-			if err == nil && latencyCount > 0 {
-				b.WriteString(fmt.Sprintf("- **平均延迟**：%s（近 %d 次）\n\n", formatManagedMs(latencyMean), latencyCount))
-			} else {
-				b.WriteString("- **平均延迟**：暂无数据\n\n")
+		b.WriteString("## 🟢 托管渠道批量恢复\n\n")
+		b.WriteString(fmt.Sprintf("**本轮影响**：%s\n\n", batchSummary))
+		for _, channelGroup := range channelGroups {
+			channelName := fmt.Sprintf("<font color=\"#1677ff\">**%s**</font>", channelGroup.channelNm)
+			b.WriteString(fmt.Sprintf("### 渠道 %s（#%d）\n\n", channelName, channelGroup.channelID))
+			for _, event := range channelGroup.events {
+				modelName := fmt.Sprintf("<font color=\"#52c41a\">**%s**</font>", event.pair.model)
+				b.WriteString(fmt.Sprintf("**🔺 %s**\n\n", modelName))
+				if event.state != nil && event.state.LastBanAt > 0 {
+					b.WriteString(fmt.Sprintf("- **距上次封禁**：%s\n", humanizeManagedDuration(now-event.state.LastBanAt)))
+				} else {
+					b.WriteString("- **距上次封禁**：暂无记录\n")
+				}
+				ttftMean, ttftCount, err := model.GetRecentTtftMean(event.pair.channelID, event.pair.model, window)
+				if err == nil && ttftCount > 0 {
+					b.WriteString(fmt.Sprintf("- **平均首字**：%s（近 %d 次）\n", formatManagedMs(ttftMean), ttftCount))
+				} else {
+					b.WriteString("- **平均首字**：暂无数据\n")
+				}
+				latencyMean, latencyCount, err := model.GetRecentLatencyMean(event.pair.channelID, event.pair.model, window)
+				if err == nil && latencyCount > 0 {
+					b.WriteString(fmt.Sprintf("- **平均延迟**：%s（近 %d 次）\n\n", formatManagedMs(latencyMean), latencyCount))
+				} else {
+					b.WriteString("- **平均延迟**：暂无数据\n\n")
+				}
 			}
 		}
 		appendRecommendationSection(&b)

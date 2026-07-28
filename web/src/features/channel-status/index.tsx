@@ -43,9 +43,8 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { formatNumber } from '@/lib/format'
-import { cn } from '@/lib/utils'
-
 import { ROLE } from '@/lib/roles'
+import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
 import {
@@ -53,6 +52,7 @@ import {
   getChannelStatus,
   getModelStatus,
 } from './api'
+import { channelStatusQueryKeys } from './query-keys'
 import type {
   BucketState,
   ChannelHealth,
@@ -649,7 +649,9 @@ function BucketDetailsDialog({
             below lists probe records only, so its row count can be lower than
             Total Requests when the bucket also had forwarding traffic. */}
         <p className='text-muted-foreground text-xs'>
-          {t('Probe records only; forwarding traffic is counted in the stats above but not listed here.')}
+          {t(
+            'Probe records only; forwarding traffic is counted in the stats above but not listed here.'
+          )}
         </p>
 
         <div className='rounded-lg border'>
@@ -742,7 +744,7 @@ export function ChannelStatus() {
     isError,
     refetch,
   } = useQuery({
-    queryKey: ['channel-monitor', 'status', isAdmin ? 'channel' : 'model', range],
+    queryKey: channelStatusQueryKeys.list(isAdmin ? 'channel' : 'model', range),
     queryFn: () => (isAdmin ? getChannelStatus(range) : getModelStatus(range)),
   })
 
