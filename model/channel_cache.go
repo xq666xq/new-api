@@ -21,6 +21,67 @@ var channelsIDM map[int]*Channel                     // all channels include dis
 // channel2advancedCustomConfig caches parsed Advanced Custom (type 58) configs so
 // path-aware selection avoids re-parsing JSON per request. Refreshed on full sync.
 var channel2advancedCustomConfig map[int]*dto.AdvancedCustomConfig
+
+// managedAbilityOverlay lets the channel-managed policy engine influence the
+// memory-cache selection path at (channel, model) granularity. The default
+// selection path only knows channel-level Status/Priority, so without this a
+// per-model ban/downgrade would be invisible to it (the DB path already honors
+// ability-level enabled/priority). Keyed by managedOverlayKey(channelId, model).
+// It is empty for unmanaged deployments, so their selection behavior is
+// unchanged. Guarded by channelSyncLock, rebuilt on every InitChannelCache.
+var managedAbilityOverlay map[string]managedOverlayEntry
+
+// managedOverlayEntry is one policy decision for a (channel, model) pair.
+// Banned removes the pair from selection even though the channel is enabled;
+// PriorityManaged replaces the channel-level priority with Priority for this
+// model only (speed-tiering).
+type managedOverlayEntry struct {
+	Banned          bool
+	PriorityManaged bool
+	Priority        int64
+}
+
+func managedOverlayKey(channelId int, model string) string {
+	return ManagedOverlayKey(channelId, model)
+}
+
+// ManagedOverlayKey is the exported form of managedOverlayKey, so callers outside
+// the model package (e.g. the monitor-list controller) can index maps returned by
+// GetAllChannelManagedStates by the same (channel, model) key.
+func ManagedOverlayKey(channelId int, model string) string {
+	return fmt.Sprintf("%d|%s", channelId, model)
+}
+
+// managedEffectivePriority returns the model-specific priority for a channel,
+// consulting an explicitly passed overlay map. Used while building the cache
+// (before the global overlay is published under lock).
+func managedEffectivePriority(overlay map[string]managedOverlayEntry, channelId int, model string, channelPriority int64) int64 {
+	if overlay != nil {
+		if entry, ok := overlay[managedOverlayKey(channelId, model)]; ok && entry.PriorityManaged {
+			return entry.Priority
+		}
+	}
+	return channelPriority
+}
+
+// effectiveChannelPriorityLocked returns the priority to use for a channel when
+// serving a specific model: the policy-managed priority if the speed engine owns
+// this (channel, model) pair, otherwise the channel-level priority. Caller must
+// hold channelSyncLock.
+func effectiveChannelPriorityLocked(channelId int, model string, channelPriority int64) int64 {
+	return managedEffectivePriority(managedAbilityOverlay, channelId, model, channelPriority)
+}
+
+// isManagedBannedLocked reports whether policy has banned this (channel, model)
+// pair. Caller must hold channelSyncLock.
+func isManagedBannedLocked(channelId int, model string) bool {
+	if managedAbilityOverlay == nil {
+		return false
+	}
+	entry, ok := managedAbilityOverlay[managedOverlayKey(channelId, model)]
+	return ok && entry.Banned
+}
+
 var channelSyncLock sync.RWMutex
 
 func InitChannelCache() {
@@ -46,6 +107,12 @@ func InitChannelCache() {
 	for _, ability := range abilities {
 		groups[ability.Group] = true
 	}
+
+	// Load the policy overlay so per-model bans/downgrades are visible to the
+	// memory-cache selection path. Built from ChannelManagedState; empty (nil map
+	// entries) for unmanaged deployments, leaving selection behavior unchanged.
+	newOverlay := loadManagedAbilityOverlay()
+
 	newGroup2model2channels := make(map[string]map[string][]int)
 	for group := range groups {
 		newGroup2model2channels[group] = make(map[string][]int)
@@ -58,6 +125,11 @@ func InitChannelCache() {
 		for _, group := range groups {
 			models := strings.Split(channel.Models, ",")
 			for _, model := range models {
+				// Policy-banned (channel, model) pairs are dropped from selection
+				// even though the channel itself is enabled.
+				if entry, ok := newOverlay[managedOverlayKey(channel.Id, model)]; ok && entry.Banned {
+					continue
+				}
 				if _, ok := newGroup2model2channels[group][model]; !ok {
 					newGroup2model2channels[group][model] = make([]int, 0)
 				}
@@ -66,11 +138,15 @@ func InitChannelCache() {
 		}
 	}
 
-	// sort by priority
+	// Sort by effective priority for the specific model: speed-tiering may assign
+	// a per-model priority that differs from the channel-level one, so the pre-sort
+	// must consult the overlay rather than GetPriority() alone.
 	for group, model2channels := range newGroup2model2channels {
 		for model, channels := range model2channels {
 			sort.Slice(channels, func(i, j int) bool {
-				return newChannelId2channel[channels[i]].GetPriority() > newChannelId2channel[channels[j]].GetPriority()
+				pi := managedEffectivePriority(newOverlay, channels[i], model, newChannelId2channel[channels[i]].GetPriority())
+				pj := managedEffectivePriority(newOverlay, channels[j], model, newChannelId2channel[channels[j]].GetPriority())
+				return pi > pj
 			})
 			newGroup2model2channels[group][model] = channels
 		}
@@ -78,6 +154,7 @@ func InitChannelCache() {
 
 	channelSyncLock.Lock()
 	group2model2channels = newGroup2model2channels
+	managedAbilityOverlay = newOverlay
 	//channelsIDM = newChannelId2channel
 	for i, channel := range newChannelId2channel {
 		if channel.ChannelInfo.IsMultiKey {
@@ -133,6 +210,21 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 		return nil, nil
 	}
 
+	// Drop pairs the policy engine has banned for this model. Empty overlay (the
+	// unmanaged case) leaves the list untouched.
+	if managedAbilityOverlay != nil {
+		filtered := make([]int, 0, len(channels))
+		for _, channelId := range channels {
+			if !isManagedBannedLocked(channelId, model) {
+				filtered = append(filtered, channelId)
+			}
+		}
+		channels = filtered
+		if len(channels) == 0 {
+			return nil, nil
+		}
+	}
+
 	if len(channels) == 1 {
 		if channel, ok := channelsIDM[channels[0]]; ok {
 			return channel, nil
@@ -143,7 +235,7 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 	uniquePriorities := make(map[int]bool)
 	for _, channelId := range channels {
 		if channel, ok := channelsIDM[channelId]; ok {
-			uniquePriorities[int(channel.GetPriority())] = true
+			uniquePriorities[int(effectiveChannelPriorityLocked(channelId, model, channel.GetPriority()))] = true
 		} else {
 			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
 		}
@@ -164,7 +256,7 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 	var targetChannels []*Channel
 	for _, channelId := range channels {
 		if channel, ok := channelsIDM[channelId]; ok {
-			if channel.GetPriority() == targetPriority {
+			if effectiveChannelPriorityLocked(channelId, model, channel.GetPriority()) == targetPriority {
 				sumWeight += channel.GetWeight()
 				targetChannels = append(targetChannels, channel)
 			}

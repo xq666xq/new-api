@@ -118,6 +118,10 @@ export function SidebarModulesSection({
         title: t('Task logs'),
         description: t('Background job tracker for queued work.'),
       },
+      channelStatus: {
+        title: t('Model Status'),
+        description: t('Model health and speed overview for members.'),
+      },
     },
     personal: {
       topup: {
@@ -133,6 +137,10 @@ export function SidebarModulesSection({
       channel: {
         title: t('Channels'),
         description: t('Configure upstream providers and routing.'),
+      },
+      channelMonitor: {
+        title: t('Channel Monitoring'),
+        description: t('Scheduled channel probes and hosting policy.'),
       },
       models: {
         title: t('Models'),

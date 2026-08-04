@@ -93,6 +93,27 @@ var passthroughSkipHeaderNamesLower = map[string]struct{}{
 	"sec-websocket-extensions": {},
 }
 
+// IsMonitorHeaderProtected reports whether a monitor template must leave the
+// header under provider or net/http control. Client identity headers such as
+// User-Agent, x-client-*, x-stainless-*, and x-codex-* are intentionally
+// allowed so a probe can reproduce a captured client request without changing
+// ordinary relay behavior.
+func IsMonitorHeaderProtected(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return true
+	}
+	if _, protected := passthroughSkipHeaderNamesLower[name]; protected {
+		return true
+	}
+	switch name {
+	case "api-key", "chatgpt-account-id", "proxy-connection":
+		return true
+	default:
+		return false
+	}
+}
+
 var headerPassthroughRegexCache sync.Map // map[string]*regexp.Regexp
 
 func getHeaderPassthroughRegex(pattern string) (*regexp.Regexp, error) {
@@ -283,6 +304,16 @@ func processHeaderOverride(info *common.RelayInfo, c *gin.Context) (map[string]s
 		}
 
 		headerOverride[key] = value
+	}
+
+	if info.IsChannelMonitor {
+		for key, value := range info.MonitorHeadersOverride {
+			key = strings.ToLower(strings.TrimSpace(key))
+			if IsMonitorHeaderProtected(key) {
+				continue
+			}
+			headerOverride[key] = value
+		}
 	}
 	return headerOverride, nil
 }
@@ -510,6 +541,9 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		}
 	}
 
+	if info.IsChannelMonitor && info.MonitorTrace != nil {
+		req = info.MonitorTrace.AttachRequest(req)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		logger.LogError(c, "do request failed: "+err.Error())
@@ -528,6 +562,9 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 			policy.String(),
 			resp.Proto,
 		))
+	}
+	if info.IsChannelMonitor && info.MonitorTrace != nil {
+		info.MonitorTrace.AttachResponse(resp)
 	}
 
 	if upID := resp.Header.Get(common2.RequestIdKey); upID != "" {

@@ -20,6 +20,7 @@ import type { QueryClient } from '@tanstack/react-query'
 import i18next from 'i18next'
 import { toast } from 'sonner'
 
+import { channelStatusQueryKeys } from '@/features/channel-status/query-keys'
 import { formatCurrencyFromUSD } from '@/lib/currency'
 
 import {
@@ -54,6 +55,13 @@ export const channelsQueryKeys = {
     [...channelsQueryKeys.lists(), params] as const,
   details: () => [...channelsQueryKeys.all, 'detail'] as const,
   detail: (id: number) => [...channelsQueryKeys.details(), id] as const,
+}
+
+export function invalidateChannelRoutingQueries(
+  queryClient?: QueryClient
+): void {
+  queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+  queryClient?.invalidateQueries({ queryKey: channelStatusQueryKeys.all })
 }
 
 function getChannelTestResponseTime(
@@ -126,7 +134,7 @@ export async function handleEnableChannel(
     const response = await updateChannelStatus(id, CHANNEL_STATUS.ENABLED)
     if (response.success) {
       toast.success(i18next.t(SUCCESS_MESSAGES.ENABLED))
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      invalidateChannelRoutingQueries(queryClient)
       onSuccess?.()
     } else {
       toast.error(response.message || i18next.t(ERROR_MESSAGES.UPDATE_FAILED))
@@ -151,7 +159,7 @@ export async function handleDisableChannel(
     )
     if (response.success) {
       toast.success(i18next.t(SUCCESS_MESSAGES.DISABLED))
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      invalidateChannelRoutingQueries(queryClient)
       onSuccess?.()
     } else {
       toast.error(response.message || i18next.t(ERROR_MESSAGES.UPDATE_FAILED))
@@ -189,7 +197,7 @@ export async function handleDeleteChannel(
     const response = await deleteChannel(id)
     if (response.success) {
       toast.success(i18next.t(SUCCESS_MESSAGES.DELETED))
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      invalidateChannelRoutingQueries(queryClient)
       onSuccess?.()
     } else {
       toast.error(response.message || i18next.t(ERROR_MESSAGES.DELETE_FAILED))
@@ -221,7 +229,11 @@ export async function handleUpdateChannelField(
           value,
         })
       )
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      if (fieldName === 'priority') {
+        invalidateChannelRoutingQueries(queryClient)
+      } else {
+        queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      }
       onSuccess?.()
     } else {
       toast.error(response.message || i18next.t(ERROR_MESSAGES.UPDATE_FAILED))
@@ -255,7 +267,11 @@ export async function handleUpdateTagField(
           tag,
         })
       )
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      if (fieldName === 'priority') {
+        invalidateChannelRoutingQueries(queryClient)
+      } else {
+        queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      }
       onSuccess?.()
     } else {
       toast.error(response.message || i18next.t(ERROR_MESSAGES.UPDATE_FAILED))
@@ -454,7 +470,7 @@ export async function handleBatchEnable(
       toast.success(
         i18next.t('{{count}} channel(s) enabled', { count: successCount })
       )
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      invalidateChannelRoutingQueries(queryClient)
       onSuccess?.()
     }
 
@@ -495,7 +511,7 @@ export async function handleBatchDisable(
       toast.success(
         i18next.t('{{count}} channel(s) disabled', { count: successCount })
       )
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      invalidateChannelRoutingQueries(queryClient)
       onSuccess?.()
     }
 
@@ -559,7 +575,7 @@ export async function handleEnableTagChannels(
       toast.success(
         i18next.t('Enabled all channels with tag: {{tag}}', { tag })
       )
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      invalidateChannelRoutingQueries(queryClient)
       onSuccess?.()
     } else {
       toast.error(
@@ -585,7 +601,7 @@ export async function handleDisableTagChannels(
       toast.success(
         i18next.t('Disabled all channels with tag: {{tag}}', { tag })
       )
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      invalidateChannelRoutingQueries(queryClient)
       onSuccess?.()
     } else {
       toast.error(

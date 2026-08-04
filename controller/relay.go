@@ -230,6 +230,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		if newAPIError == nil {
 			relayInfo.LastError = nil
+			// A successful forward breaks any error streak for this (channel, model),
+			// so the error-triggered probe requires a truly consecutive run. Gated by
+			// the feature flag so the default-off case never touches the counter on the
+			// hot success path.
+			service.ResetChannelModelErrorProbeIfEnabled(channel.Id, relayInfo.OriginModelName)
 			return
 		}
 
@@ -364,7 +369,18 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.Error())))
 	// 不要使用context获取渠道信息，异步处理时可能会出现渠道信息不一致的情况
 	// do not use context to get channel info, there may be inconsistent channel info when processing asynchronously
-	if service.ShouldDisableChannel(err) && channelError.AutoBan {
+	// Error-triggered probe takes precedence over the legacy auto-disable and is
+	// independent of the global auto-disable switch and the channel's AutoBan flag:
+	// for a managed channel that monitors this model, a genuine upstream fault is
+	// counted and, once a stable streak is confirmed, only advances the next monitor
+	// probe so the managed ban/recover policy — not this single error — decides the
+	// channel's fate. When it takes ownership we must not also auto-disable.
+	modelName := c.GetString("original_model")
+	if service.TryDeferChannelDisableToProbe(channelError.ChannelId, modelName, err) {
+		// handled by the monitor/managed policy; skip the legacy auto-disable
+	} else if service.ShouldDisableChannel(err) && channelError.AutoBan {
+		// Non-managed channels (and any case the probe path declines to own) keep the
+		// legacy immediate auto-disable, still gated by the global switch + AutoBan.
 		gopool.Go(func() {
 			service.DisableChannel(channelError, err.ErrorWithStatusCode())
 		})
@@ -579,6 +595,11 @@ func RelayTask(c *gin.Context) {
 
 	// ── 成功：结算 + 日志 + 插入任务 ──
 	if taskErr == nil {
+		// A successful task submit breaks any error streak for this (channel, model)
+		// so the error-triggered probe stays consecutive-only; gated internally. The
+		// loop-scoped channel is gone here, so use the context channel id set for the
+		// succeeding attempt.
+		service.ResetChannelModelErrorProbeIfEnabled(c.GetInt("channel_id"), relayInfo.OriginModelName)
 		if settleErr := service.SettleBilling(c, relayInfo, result.Quota); settleErr != nil {
 			common.SysError("settle task billing error: " + settleErr.Error())
 		}

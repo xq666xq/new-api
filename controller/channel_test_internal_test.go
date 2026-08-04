@@ -2,6 +2,7 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -328,4 +329,184 @@ func TestTestAllChannelsRejectsExistingActiveTask(t *testing.T) {
 	require.Equal(t, http.StatusConflict, recorder.Code)
 	require.Contains(t, recorder.Body.String(), existing.TaskID)
 	require.Contains(t, recorder.Body.String(), "已有通道测试任务正在运行或等待中")
+}
+
+func TestApplyMonitorRequestBodyMergesConfiguredFields(t *testing.T) {
+	request := &dto.GeneralOpenAIRequest{
+		Model:    "model-a",
+		Messages: []dto.Message{{Role: "user", Content: "hi"}},
+	}
+	config := &model.ChannelMonitorConfig{BodyMode: "merge", BodyJson: `{"max_tokens":32}`}
+
+	converted, err := applyMonitorRequestBody(request, config)
+	require.NoError(t, err)
+	actual, ok := converted.(*dto.GeneralOpenAIRequest)
+	require.True(t, ok)
+	require.NotNil(t, actual.MaxTokens)
+	assert.EqualValues(t, 32, *actual.MaxTokens)
+	assert.Equal(t, "model-a", actual.Model)
+	require.Len(t, actual.Messages, 1)
+}
+
+func TestBuildMonitorRequestUsesEndpointNativePayload(t *testing.T) {
+	claudeRequest, ok := buildMonitorRequest(
+		"claude-sonnet-4",
+		string(constant.EndpointTypeAnthropic),
+		nil,
+		false,
+	).(*dto.ClaudeRequest)
+	require.True(t, ok)
+	assert.Equal(t, "claude-sonnet-4", claudeRequest.Model)
+	require.Len(t, claudeRequest.Messages, 1)
+
+	geminiRequest, ok := buildMonitorRequest(
+		"gemini-2.5-pro",
+		string(constant.EndpointTypeGemini),
+		nil,
+		false,
+	).(*dto.GeminiChatRequest)
+	require.True(t, ok)
+	require.Len(t, geminiRequest.Contents, 1)
+	require.Len(t, geminiRequest.Contents[0].Parts, 1)
+	assert.Equal(t, "hi", geminiRequest.Contents[0].Parts[0].Text)
+}
+
+func TestApplyMonitorQuestionUsesEndpointConversationField(t *testing.T) {
+	const question = "Explain what an API health check is."
+
+	t.Run("openai chat", func(t *testing.T) {
+		request := &dto.GeneralOpenAIRequest{
+			Messages: []dto.Message{{
+				Role: "user",
+				Content: []any{
+					map[string]any{"type": "text", "text": "template", "cache_control": map[string]any{"type": "ephemeral"}},
+				},
+			}},
+		}
+
+		require.NoError(t, applyMonitorQuestion(request, question))
+		content, ok := request.Messages[0].Content.([]any)
+		require.True(t, ok)
+		block, ok := content[0].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, question, block["text"])
+		assert.NotNil(t, block["cache_control"])
+	})
+
+	t.Run("anthropic", func(t *testing.T) {
+		request := &dto.ClaudeRequest{
+			Messages: []dto.ClaudeMessage{{Role: "user", Content: "template"}},
+		}
+
+		require.NoError(t, applyMonitorQuestion(request, question))
+		assert.Equal(t, question, request.Messages[0].Content)
+	})
+
+	t.Run("gemini", func(t *testing.T) {
+		request := &dto.GeminiChatRequest{
+			Contents: []dto.GeminiChatContent{{Role: "user", Parts: []dto.GeminiPart{{Text: "template"}}}},
+		}
+
+		require.NoError(t, applyMonitorQuestion(request, question))
+		assert.Equal(t, question, request.Contents[0].Parts[0].Text)
+	})
+
+	t.Run("responses", func(t *testing.T) {
+		request := &dto.OpenAIResponsesRequest{
+			Input: []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"template"}]}]`),
+		}
+
+		require.NoError(t, applyMonitorQuestion(request, question))
+		var input []dto.Input
+		require.NoError(t, common.Unmarshal(request.Input, &input))
+		require.Len(t, input, 1)
+		var content []map[string]any
+		require.NoError(t, common.Unmarshal(input[0].Content, &content))
+		require.Len(t, content, 1)
+		assert.Equal(t, question, content[0]["text"])
+	})
+}
+
+func TestSelectMonitorQuestionFallsBackAndUsesPersistedEntry(t *testing.T) {
+	id, content := selectMonitorQuestion(nil)
+	assert.Zero(t, id)
+	assert.Equal(t, defaultMonitorProbeQuestion, content)
+
+	id, content = selectMonitorQuestion([]*model.MonitorQuestion{{Id: 9, Content: "What does HTTP 404 mean?"}})
+	assert.Equal(t, 9, id)
+	assert.Equal(t, "What does HTTP 404 mean?", content)
+}
+
+func TestApplyMonitorRequestHeadersAllowsClientIdentityAndBlocksProtectedHeaders(t *testing.T) {
+	headerJSON, err := common.Marshal([]model.ChannelMonitorHeader{
+		{Key: "X-Monitor", Value: "enabled"},
+		{Key: "Authorization", Value: "Bearer forged"},
+		{Key: "ChatGPT-Account-Id", Value: "forged-account"},
+		{Key: "Content-Length", Value: "1"},
+		{Key: "User-Agent", Value: "codex-tui/0.145.0"},
+		{Key: "X-Client-Request-Id", Value: "request-123"},
+		{Key: "X-Codex-Beta-Features", Value: "remote_compaction_v2"},
+	})
+	require.NoError(t, err)
+	config := &model.ChannelMonitorConfig{Headers: model.JSONValue(headerJSON)}
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	overrides := applyMonitorRequestHeaders(request, config)
+
+	assert.Equal(t, "enabled", request.Header.Get("X-Monitor"))
+	assert.Empty(t, request.Header.Get("Authorization"))
+	assert.Empty(t, request.Header.Get("ChatGPT-Account-Id"))
+	assert.Empty(t, request.Header.Get("Content-Length"))
+	assert.Equal(t, "codex-tui/0.145.0", request.Header.Get("User-Agent"))
+	assert.Equal(t, "request-123", request.Header.Get("X-Client-Request-Id"))
+	assert.Equal(t, "remote_compaction_v2", request.Header.Get("X-Codex-Beta-Features"))
+	assert.Equal(t, "codex-tui/0.145.0", overrides["user-agent"])
+	assert.Equal(t, "request-123", overrides["x-client-request-id"])
+	assert.NotContains(t, overrides, "authorization")
+	assert.NotContains(t, overrides, "chatgpt-account-id")
+}
+
+// TestAbnormalStreamEndErrorClassifiesProbeOutcome guards the probe-success
+// contract: a streamed relay handler returns nil no matter how the stream ended,
+// so the probe classifies the outcome from StreamStatus itself. A clean end
+// (Done/EOF/HandlerStop) must stay a success (nil error), while a truncation
+// caused by the probe timeout, a mid-stream abort, a scanner error, a keepalive
+// failure, or a panic must become a probe failure. Without this, a channel that
+// never finishes streaming within the probe timeout was recorded as 成功 with
+// latency pinned to the timeout.
+func TestAbnormalStreamEndErrorClassifiesProbeOutcome(t *testing.T) {
+	tests := []struct {
+		name    string
+		reason  relaycommon.StreamEndReason
+		endErr  error
+		wantErr bool
+	}{
+		{name: "nil status is normal"},
+		{name: "done", reason: relaycommon.StreamEndReasonDone},
+		{name: "eof", reason: relaycommon.StreamEndReasonEOF},
+		{name: "handler stop", reason: relaycommon.StreamEndReasonHandlerStop},
+		{name: "timeout", reason: relaycommon.StreamEndReasonTimeout, wantErr: true},
+		{name: "client gone", reason: relaycommon.StreamEndReasonClientGone, endErr: context.DeadlineExceeded, wantErr: true},
+		{name: "scanner error", reason: relaycommon.StreamEndReasonScannerErr, endErr: fmt.Errorf("boom"), wantErr: true},
+		{name: "ping fail", reason: relaycommon.StreamEndReasonPingFail, wantErr: true},
+		{name: "panic", reason: relaycommon.StreamEndReasonPanic, wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var status *relaycommon.StreamStatus
+			if test.name != "nil status is normal" {
+				status = relaycommon.NewStreamStatus()
+				status.SetEndReason(test.reason, test.endErr)
+			}
+
+			err := abnormalStreamEndError(status)
+
+			if test.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }

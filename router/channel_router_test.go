@@ -2,6 +2,7 @@ package router
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
 
@@ -35,6 +36,47 @@ func TestChannelStatusRoutesRegisterWithoutConflict(t *testing.T) {
 	require.NotPanics(t, func() {
 		registerChannelRoutes(api)
 	})
+}
+
+// TestChannelCollectionRootResolvesWithoutTrailingSlash guards against a
+// regression where GET /api/channel (no trailing slash) returned 404. Gin
+// normally 301-redirects the no-slash form to the "/" route, but that
+// trailing-slash redirect is silently dropped once the full route tree
+// contains a root-level param wildcard (/:mode/mj, from the relay router)
+// alongside the /api/channel vs /api/channel_monitor prefix split. The
+// channel router works around it by also registering the exact no-slash
+// alias, so the collection root must resolve to a handler (401 without a
+// session), never 404.
+func TestChannelCollectionRootResolvesWithoutTrailingSlash(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	SetApiRouter(engine)
+	SetDashboardRouter(engine)
+	SetRelayRouter(engine)
+	SetVideoRouter(engine)
+
+	for _, target := range []string{
+		"/api/channel",
+		"/api/channel/",
+		"/api/channel?tag_mode=false&id_sort=false&p=1&page_size=20",
+	} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		engine.ServeHTTP(w, req)
+		assert.Equalf(t, http.StatusUnauthorized, w.Code,
+			"GET %s should resolve to the channel list handler (auth-gated), not 404", target)
+	}
+}
+
+func TestChannelMonitorManualProbeRouteResolves(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	SetApiRouter(engine)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/channel_monitor/probe", nil)
+	engine.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
 func assertChannelRoutePermission(t *testing.T, method string, path string, permission authz.Permission, handler any) {

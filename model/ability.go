@@ -302,6 +302,17 @@ func (channel *Channel) UpdateAbilities(tx *gorm.DB) error {
 		}
 	}
 
+	// The abilities just rebuilt above take enabled/priority from the channel-level
+	// single values, which would silently undo any per-model ban/downgrade the
+	// channel-managed policy applied. Replay the persisted managed decisions onto
+	// the fresh rows so a channel edit never clobbers policy state.
+	if err = ReplayManagedAbilities(tx, channel.Id); err != nil {
+		if isNewTx {
+			tx.Rollback()
+		}
+		return err
+	}
+
 	// 如果是新创建的事务，需要提交
 	if isNewTx {
 		return tx.Commit().Error
@@ -330,6 +341,50 @@ func UpdateAbilityByTag(tag string, newTag *string, priority *int64, weight *uin
 		ability.Weight = *weight
 	}
 	return DB.Model(&Ability{}).Where("tag = ?", tag).Updates(ability).Error
+}
+
+// SetChannelModelAbilityEnabled enables/disables the ability rows for one
+// (channel, model) pair across all of the channel's groups. This is the
+// model-level granularity the managed policy's ban/recover uses: unlike
+// UpdateAbilityStatus (whole channel) it targets a single model, leaving the
+// channel's other models untouched.
+func SetChannelModelAbilityEnabled(channelId int, modelName string, enabled bool) error {
+	return DB.Model(&Ability{}).
+		Where("channel_id = ? AND model = ?", channelId, modelName).
+		Select("enabled").Update("enabled", enabled).Error
+}
+
+// SetChannelModelAbilityPriority sets the priority on the ability rows for one
+// (channel, model) pair across all groups. Used by the speed-tiering stage to
+// downgrade/upgrade a single model without touching the channel-level priority
+// or the channel's other models.
+func SetChannelModelAbilityPriority(channelId int, modelName string, priority int64) error {
+	return DB.Model(&Ability{}).
+		Where("channel_id = ? AND model = ?", channelId, modelName).
+		Update("priority", priority).Error
+}
+
+// GetChannelModelAbilityPriority returns the current ability priority for one
+// (channel, model) pair. Since all groups of a pair share the same priority, the
+// first row is representative. Falls back to the channel-level priority when no
+// ability row exists yet.
+func GetChannelModelAbilityPriority(channelId int, modelName string) (int64, error) {
+	var ability Ability
+	err := DB.Where("channel_id = ? AND model = ?", channelId, modelName).First(&ability).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			channel, chErr := GetChannelById(channelId, false)
+			if chErr != nil || channel == nil {
+				return 0, nil
+			}
+			return channel.GetPriority(), nil
+		}
+		return 0, err
+	}
+	if ability.Priority == nil {
+		return 0, nil
+	}
+	return *ability.Priority, nil
 }
 
 var fixLock = sync.Mutex{}
@@ -378,6 +433,11 @@ func FixAbility() (int, int, error) {
 		// Then add new abilities
 		for _, channel := range chunk {
 			err = channel.AddAbilities(nil)
+			if err == nil {
+				// FixAbility rebuilds through AddAbilities rather than
+				// UpdateAbilities, so explicitly replay the managed overlay here.
+				err = ReplayManagedAbilities(DB, channel.Id)
+			}
 			if err != nil {
 				common.SysLog(fmt.Sprintf("Add abilities for channel %d failed: %s", channel.Id, err.Error()))
 				failCount++

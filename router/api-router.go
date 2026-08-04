@@ -320,6 +320,41 @@ func SetApiRouter(router *gin.Engine) {
 			prefillGroupRoute.DELETE("/:id", controller.DeletePrefillGroup)
 		}
 
+		channelMonitorRoute := apiRouter.Group("/channel_monitor")
+		channelMonitorRoute.Use(middleware.AdminAuth())
+		{
+			channelMonitorRoute.GET("/", controller.GetChannelMonitorList)
+			channelMonitorRoute.GET("/status", controller.GetChannelMonitorStatus)
+			channelMonitorRoute.GET("/status/details", controller.GetChannelMonitorResultDetails)
+			channelMonitorRoute.POST("/probe", controller.ProbeChannelMonitorNow)
+			channelMonitorRoute.POST("/trigger", controller.TriggerChannelMonitorNow)
+			channelMonitorRoute.POST("/config", controller.SaveChannelMonitorConfig)
+			channelMonitorRoute.GET("/settings", controller.GetChannelMonitorSetting)
+			channelMonitorRoute.PUT("/settings", controller.UpdateChannelMonitorSetting)
+			channelMonitorRoute.GET("/questions", controller.GetMonitorQuestions)
+			channelMonitorRoute.POST("/questions", controller.CreateMonitorQuestion)
+			channelMonitorRoute.PUT("/questions", controller.UpdateMonitorQuestion)
+			channelMonitorRoute.DELETE("/questions/:id", controller.DeleteMonitorQuestion)
+			channelMonitorRoute.GET("/policy", controller.GetManagedPolicySetting)
+			channelMonitorRoute.PUT("/policy", controller.UpdateManagedPolicySetting)
+			channelMonitorRoute.GET("/recommendations", controller.GetChannelRecommendations)
+			channelMonitorRoute.POST("/recommendations", controller.SaveChannelRecommendations)
+			channelMonitorRoute.GET("/templates", controller.GetMonitorTemplates)
+			channelMonitorRoute.POST("/templates", controller.CreateMonitorTemplate)
+			channelMonitorRoute.PUT("/templates", controller.UpdateMonitorTemplate)
+			channelMonitorRoute.DELETE("/templates/:id", controller.DeleteMonitorTemplate)
+			channelMonitorRoute.POST("/templates/:id/apply", controller.ApplyMonitorTemplate)
+		}
+
+		// Member-facing model status: the same monitor data aggregated by model
+		// with channel identity stripped, so normal users can see model health
+		// and speed without learning which channel serves each model.
+		modelStatusRoute := apiRouter.Group("/model_status")
+		modelStatusRoute.Use(middleware.UserAuth())
+		{
+			modelStatusRoute.GET("/", controller.GetModelStatus)
+		}
+
 		mjRoute := apiRouter.Group("/mj")
 		mjRoute.GET("/self", middleware.UserAuth(), controller.GetUserMidjourney)
 		mjRoute.GET("/", middleware.AdminAuth(), controller.GetAllMidjourney)

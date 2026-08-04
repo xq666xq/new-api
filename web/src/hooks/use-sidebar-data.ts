@@ -22,10 +22,12 @@ import {
   CreditCard,
   FileText,
   FlaskConical,
+  HeartPulse,
   Key,
   LayoutDashboard,
   ListTodo,
   MessageSquare,
+  Radar,
   Radio,
   ServerCog,
   Settings,
@@ -81,6 +83,11 @@ export function useSidebarData(): SidebarData {
             icon: LayoutDashboard,
           },
           {
+            title: t('Model Status'),
+            url: '/channel-status',
+            icon: HeartPulse,
+          },
+          {
             title: t('API Keys'),
             url: '/keys',
             icon: Key,
@@ -123,6 +130,11 @@ export function useSidebarData(): SidebarData {
             title: t('Channels'),
             url: '/channels',
             icon: Radio,
+          },
+          {
+            title: t('Channel Monitoring'),
+            url: '/channel-monitor',
+            icon: Radar,
           },
           {
             title: t('Models'),

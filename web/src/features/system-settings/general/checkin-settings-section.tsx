@@ -22,6 +22,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { z } from 'zod'
 
+import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
   Form,
   FormControl,
@@ -58,6 +59,7 @@ export function CheckinSettingsSection({
     enabled: boolean
     minQuota: number
     maxQuota: number
+    quotaPerUnit: number
   }
 }) {
   const { t } = useTranslation()
@@ -146,51 +148,70 @@ export function CheckinSettingsSection({
           />
 
           {enabled && (
-            <div className='grid gap-6 sm:grid-cols-2'>
-              <FormField
-                control={form.control}
-                name='minQuota'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>{t('Minimum check-in quota')}</FormLabel>
-                    <FormControl>
-                      <Input
-                        type='number'
-                        min={0}
-                        placeholder={t('1000')}
-                        {...field}
-                      />
-                    </FormControl>
-                    <FormDescription>
-                      {t('Minimum quota amount awarded for check-in')}
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+            <>
+              <Alert>
+                <AlertDescription>
+                  {t(
+                    'Rewards use quota units, not currency amounts. At the current rate, {{quotaPerUnit}} quota units equal 1 USD. For a 10–50 USD reward, enter {{minQuota}}–{{maxQuota}}.',
+                    {
+                      quotaPerUnit: defaultValues.quotaPerUnit.toLocaleString(),
+                      minQuota: (
+                        defaultValues.quotaPerUnit * 10
+                      ).toLocaleString(),
+                      maxQuota: (
+                        defaultValues.quotaPerUnit * 50
+                      ).toLocaleString(),
+                    }
+                  )}
+                </AlertDescription>
+              </Alert>
 
-              <FormField
-                control={form.control}
-                name='maxQuota'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>{t('Maximum check-in quota')}</FormLabel>
-                    <FormControl>
-                      <Input
-                        type='number'
-                        min={0}
-                        placeholder={t('10000')}
-                        {...field}
-                      />
-                    </FormControl>
-                    <FormDescription>
-                      {t('Maximum quota amount awarded for check-in')}
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </div>
+              <div className='grid gap-6 sm:grid-cols-2'>
+                <FormField
+                  control={form.control}
+                  name='minQuota'
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>{t('Minimum check-in quota')}</FormLabel>
+                      <FormControl>
+                        <Input
+                          type='number'
+                          min={0}
+                          placeholder={t('1000')}
+                          {...field}
+                        />
+                      </FormControl>
+                      <FormDescription>
+                        {t('Minimum quota amount awarded for check-in')}
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={form.control}
+                  name='maxQuota'
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>{t('Maximum check-in quota')}</FormLabel>
+                      <FormControl>
+                        <Input
+                          type='number'
+                          min={0}
+                          placeholder={t('10000')}
+                          {...field}
+                        />
+                      </FormControl>
+                      <FormDescription>
+                        {t('Maximum quota amount awarded for check-in')}
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              </div>
+            </>
           )}
         </SettingsForm>
       </Form>
