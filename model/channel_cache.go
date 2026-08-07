@@ -188,10 +188,16 @@ func SyncChannelCache(frequency int) {
 	}
 }
 
-func GetRandomSatisfiedChannel(group string, model string, retry int, requestPath string) (*Channel, error) {
+// GetRandomSatisfiedChannel picks a channel for (group, model), honoring priority
+// tiers and weights. excludeChannel holds channels that already failed this
+// request; they are dropped from the candidate pool before tiers are computed, so
+// a retry never lands on an upstream that just failed and the highest remaining
+// tier is always tried before descending. Returns (nil, nil) once every candidate
+// is excluded, which the caller surfaces as "no available channel".
+func GetRandomSatisfiedChannel(group string, model string, requestPath string, excludeChannel map[int]struct{}) (*Channel, error) {
 	// if memory cache is disabled, get channel directly from database
 	if !common.MemoryCacheEnabled {
-		return GetChannel(group, model, retry, requestPath)
+		return GetChannel(group, model, requestPath, excludeChannel)
 	}
 
 	channelSyncLock.RLock()
@@ -210,14 +216,19 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 		return nil, nil
 	}
 
-	// Drop pairs the policy engine has banned for this model. Empty overlay (the
-	// unmanaged case) leaves the list untouched.
-	if managedAbilityOverlay != nil {
+	// Drop pairs the policy engine has banned for this model, plus any channel that
+	// already failed this request. Empty overlay (the unmanaged case) and an empty
+	// exclude set leave the list untouched.
+	if managedAbilityOverlay != nil || len(excludeChannel) > 0 {
 		filtered := make([]int, 0, len(channels))
 		for _, channelId := range channels {
-			if !isManagedBannedLocked(channelId, model) {
-				filtered = append(filtered, channelId)
+			if _, excluded := excludeChannel[channelId]; excluded {
+				continue
 			}
+			if managedAbilityOverlay != nil && isManagedBannedLocked(channelId, model) {
+				continue
+			}
+			filtered = append(filtered, channelId)
 		}
 		channels = filtered
 		if len(channels) == 0 {
@@ -232,26 +243,22 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 		return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channels[0])
 	}
 
-	uniquePriorities := make(map[int]bool)
-	for _, channelId := range channels {
-		if channel, ok := channelsIDM[channelId]; ok {
-			uniquePriorities[int(effectiveChannelPriorityLocked(channelId, model, channel.GetPriority()))] = true
-		} else {
+	// The candidate pool already excludes channels that failed this request, so the
+	// tier to use is simply the highest priority still represented. Indexing tiers by
+	// retry count would skip untried same-tier channels: with A1,A2 at priority 20 and
+	// B at 10, retry=1 jumped straight to B and A2 was never tried.
+	var targetPriority int64
+	for i, channelId := range channels {
+		channel, ok := channelsIDM[channelId]
+		if !ok {
 			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
 		}
+		priority := effectiveChannelPriorityLocked(channelId, model, channel.GetPriority())
+		if i == 0 || priority > targetPriority {
+			targetPriority = priority
+		}
 	}
-	var sortedUniquePriorities []int
-	for priority := range uniquePriorities {
-		sortedUniquePriorities = append(sortedUniquePriorities, priority)
-	}
-	sort.Sort(sort.Reverse(sort.IntSlice(sortedUniquePriorities)))
 
-	if retry >= len(uniquePriorities) {
-		retry = len(uniquePriorities) - 1
-	}
-	targetPriority := int64(sortedUniquePriorities[retry])
-
-	// get the priority for the given retry number
 	var sumWeight = 0
 	var targetChannels []*Channel
 	for _, channelId := range channels {

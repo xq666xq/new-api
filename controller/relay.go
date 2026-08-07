@@ -243,6 +243,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 
+		// This channel just failed; keep later retries off it so a retry actually
+		// reaches a different upstream instead of re-hitting the same fault.
+		retryParam.MarkChannelFailed(channel.Id)
+
 		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
 			break
 		}
@@ -580,6 +584,13 @@ func RelayTask(c *gin.Context) {
 				*types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey,
 					common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()),
 				types.NewOpenAIError(taskErr.Error, types.ErrorCodeBadResponseStatusCode, taskErr.StatusCode))
+		}
+
+		// Keep later retries off the channel that just failed. A locked channel is an
+		// explicit pin (task follow-ups must stay on the submitting upstream), so it is
+		// never excluded — getChannel is not consulted for it anyway.
+		if _, locked := relayInfo.LockedChannel.(*model.Channel); !locked {
+			retryParam.MarkChannelFailed(channel.Id)
 		}
 
 		if !shouldRetryTaskRelay(c, channel.Id, taskErr, common.RetryTimes-retryParam.GetRetry()) {

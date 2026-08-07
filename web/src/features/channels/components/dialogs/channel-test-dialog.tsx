@@ -99,6 +99,7 @@ import type {
   SearchChannelsResponse,
 } from '../../types'
 import { useChannels } from '../channels-provider'
+import { DetectionConfigPanel } from './detection-config-panel'
 
 type ChannelTestDialogProps = {
   open: boolean
@@ -1050,6 +1051,15 @@ function ChannelTestDialogContent({
               </p>
             </div>
           </div>
+
+          <DetectionConfigPanel
+            open={open}
+            channelId={currentRow.id}
+            endpointType={endpointType}
+            stream={effectiveStreamTest}
+            onEndpointTypeChange={handleEndpointTypeChange}
+            onStreamChange={setIsStreamTest}
+          />
 
           <div className='space-y-3 max-sm:has-[div[role="toolbar"]]:pb-16'>
             <div className='flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between'>

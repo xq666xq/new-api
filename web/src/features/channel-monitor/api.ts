@@ -290,10 +290,26 @@ function questionToWire(question: MonitorQuestion) {
 // API calls
 // ---------------------------------------------------------------------------
 
-/** Fetch the monitor list, synced with the channel list. */
+/** Fetch the monitor list: one row per configured channel. */
 export async function getChannelMonitorList(): Promise<ChannelMonitorRow[]> {
   const res = await api.get<ApiResponse<RawRow[]>>('/api/channel_monitor/')
   return (res.data?.data ?? []).map(toMonitorRow)
+}
+
+/**
+ * Remove a channel from the monitor list. The server drops the config row, clears
+ * any managed-policy state and restores the channel's ability rows, so a
+ * policy-banned model cannot stay disabled after the row disappears.
+ */
+export async function deleteChannelMonitorConfig(
+  channelId: number
+): Promise<void> {
+  const res = await api.delete<ApiResponse<null>>(
+    `/api/channel_monitor/config/${channelId}`
+  )
+  if (!res.data?.success) {
+    throw new Error(res.data?.message || 'delete monitor config failed')
+  }
 }
 
 /** Create or update a single channel's monitor config. */

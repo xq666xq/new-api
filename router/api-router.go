@@ -329,6 +329,7 @@ func SetApiRouter(router *gin.Engine) {
 			channelMonitorRoute.POST("/probe", controller.ProbeChannelMonitorNow)
 			channelMonitorRoute.POST("/trigger", controller.TriggerChannelMonitorNow)
 			channelMonitorRoute.POST("/config", controller.SaveChannelMonitorConfig)
+			channelMonitorRoute.DELETE("/config/:id", controller.DeleteChannelMonitorConfig)
 			channelMonitorRoute.GET("/settings", controller.GetChannelMonitorSetting)
 			channelMonitorRoute.PUT("/settings", controller.UpdateChannelMonitorSetting)
 			channelMonitorRoute.GET("/questions", controller.GetMonitorQuestions)

@@ -107,11 +107,13 @@ func IsMonitorHeaderProtected(name string) bool {
 		return true
 	}
 	switch name {
-	case "api-key", "chatgpt-account-id", "proxy-connection":
+	case "api-key", "anthropic-api-key", "chatgpt-account-id", "proxy-connection":
 		return true
-	default:
-		return false
 	}
+	return strings.Contains(name, "authorization") ||
+		strings.HasSuffix(name, "-api-key") ||
+		strings.HasSuffix(name, "-access-token") ||
+		strings.HasSuffix(name, "-auth-token")
 }
 
 var headerPassthroughRegexCache sync.Map // map[string]*regexp.Regexp
@@ -305,7 +307,6 @@ func processHeaderOverride(info *common.RelayInfo, c *gin.Context) (map[string]s
 
 		headerOverride[key] = value
 	}
-
 	if info.IsChannelMonitor {
 		for key, value := range info.MonitorHeadersOverride {
 			key = strings.ToLower(strings.TrimSpace(key))
@@ -417,7 +418,11 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 		targetHeader.Set(key, value)
 	}
 	targetHeader.Set("Content-Type", c.Request.Header.Get("Content-Type"))
-	targetConn, _, err := websocket.DefaultDialer.Dial(fullRequestURL, targetHeader)
+	dialer, err := service.NewWebSocketDialerWithProxy(info.ChannelSetting.Proxy, 0)
+	if err != nil {
+		return nil, fmt.Errorf("configure websocket proxy: %w", err)
+	}
+	targetConn, _, err := dialer.DialContext(c.Request.Context(), fullRequestURL, targetHeader)
 	if err != nil {
 		return nil, fmt.Errorf("dial failed to %s: %w", common.SanitizeURLForLog(fullRequestURL), err)
 	}
@@ -552,6 +557,9 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	if resp == nil {
 		return nil, errors.New("resp is nil")
 	}
+	if info.IsChannelMonitor && info.MonitorTrace != nil {
+		info.MonitorTrace.AttachResponse(resp)
+	}
 	if common2.DebugEnabled {
 		policy := service.NormalizeHTTPTransportPolicy(info.ChannelSetting)
 		logger.LogDebug(c, fmt.Sprintf(
@@ -563,10 +571,6 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 			resp.Proto,
 		))
 	}
-	if info.IsChannelMonitor && info.MonitorTrace != nil {
-		info.MonitorTrace.AttachResponse(resp)
-	}
-
 	if upID := resp.Header.Get(common2.RequestIdKey); upID != "" {
 		c.Set(common2.UpstreamRequestIdKey, upID)
 	}

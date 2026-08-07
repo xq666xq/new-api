@@ -11,12 +11,13 @@ import (
 )
 
 type RetryParam struct {
-	Ctx          *gin.Context
-	TokenGroup   string
-	ModelName    string
-	RequestPath  string
-	Retry        *int
-	resetNextTry bool
+	Ctx            *gin.Context
+	TokenGroup     string
+	ModelName      string
+	RequestPath    string
+	Retry          *int
+	resetNextTry   bool
+	ExcludeChannel map[int]struct{} // 排除已失败的渠道 ID
 }
 
 func (p *RetryParam) GetRetry() int {
@@ -43,6 +44,19 @@ func (p *RetryParam) IncreaseRetry() {
 
 func (p *RetryParam) ResetRetryNextTry() {
 	p.resetNextTry = true
+}
+
+// MarkChannelFailed records a channel that already failed this request so later
+// retries skip it. A retry that lands on the same upstream fault is wasted work
+// and shows up in the logs as the same channel being called twice in a row.
+func (p *RetryParam) MarkChannelFailed(channelId int) {
+	if p == nil || channelId <= 0 {
+		return
+	}
+	if p.ExcludeChannel == nil {
+		p.ExcludeChannel = make(map[int]struct{})
+	}
+	p.ExcludeChannel[channelId] = struct{}{}
 }
 
 // CacheGetRandomSatisfiedChannel tries to get a random channel that satisfies the requirements.
@@ -115,10 +129,11 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			}
 			logger.LogDebug(param.Ctx, "Auto selecting group: %s, priorityRetry: %d", autoGroup, priorityRetry)
 
-			channel, _ = model.GetRandomSatisfiedChannel(autoGroup, param.ModelName, priorityRetry, param.RequestPath)
+			channel, _ = model.GetRandomSatisfiedChannel(autoGroup, param.ModelName, param.RequestPath, param.ExcludeChannel)
 			if channel == nil {
-				// Current group has no available channel for this model, try next group
-				// 当前分组没有该模型的可用渠道，尝试下一个分组
+				// Current group has no available channel left for this model (either none
+				// exist or every candidate already failed this request), try next group
+				// 当前分组没有该模型的可用渠道（不存在或均已失败），尝试下一个分组
 				logger.LogDebug(param.Ctx, "No available channel in group %s for model %s at priorityRetry %d, trying next group", autoGroup, param.ModelName, priorityRetry)
 				// 重置状态以尝试下一个分组
 				common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroupIndex, i+1)
@@ -153,7 +168,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			break
 		}
 	} else {
-		channel, err = model.GetRandomSatisfiedChannel(param.TokenGroup, param.ModelName, param.GetRetry(), param.RequestPath)
+		channel, err = model.GetRandomSatisfiedChannel(param.TokenGroup, param.ModelName, param.RequestPath, param.ExcludeChannel)
 		if err != nil {
 			return nil, param.TokenGroup, err
 		}

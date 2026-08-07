@@ -1,18 +1,310 @@
 package channel
 
 import (
+	"bufio"
+	"context"
+	"encoding/binary"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type socks5ProxyObservation struct {
+	targetAddress string
+}
+
+func startSOCKS5ForwardProxy(t *testing.T, upstreamAddress string) (string, <-chan socks5ProxyObservation, <-chan error) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+
+	observations := make(chan socks5ProxyObservation, 1)
+	errors := make(chan error, 1)
+	go func() {
+		clientConn, err := listener.Accept()
+		if err != nil {
+			errors <- err
+			return
+		}
+		defer clientConn.Close()
+		reader := bufio.NewReader(clientConn)
+
+		greeting := make([]byte, 2)
+		if _, err := io.ReadFull(reader, greeting); err != nil {
+			errors <- err
+			return
+		}
+		if greeting[0] != 5 || greeting[1] == 0 {
+			errors <- fmt.Errorf("invalid SOCKS5 greeting")
+			return
+		}
+		methods := make([]byte, int(greeting[1]))
+		if _, err := io.ReadFull(reader, methods); err != nil {
+			errors <- err
+			return
+		}
+		if _, err := clientConn.Write([]byte{5, 0}); err != nil {
+			errors <- err
+			return
+		}
+
+		requestHeader := make([]byte, 4)
+		if _, err := io.ReadFull(reader, requestHeader); err != nil {
+			errors <- err
+			return
+		}
+		if requestHeader[0] != 5 || requestHeader[1] != 1 {
+			errors <- fmt.Errorf("unsupported SOCKS5 command")
+			return
+		}
+
+		var host string
+		switch requestHeader[3] {
+		case 1:
+			address := make([]byte, net.IPv4len)
+			if _, err := io.ReadFull(reader, address); err != nil {
+				errors <- err
+				return
+			}
+			host = net.IP(address).String()
+		case 3:
+			length, err := reader.ReadByte()
+			if err != nil {
+				errors <- err
+				return
+			}
+			address := make([]byte, int(length))
+			if _, err := io.ReadFull(reader, address); err != nil {
+				errors <- err
+				return
+			}
+			host = string(address)
+		case 4:
+			address := make([]byte, net.IPv6len)
+			if _, err := io.ReadFull(reader, address); err != nil {
+				errors <- err
+				return
+			}
+			host = net.IP(address).String()
+		default:
+			errors <- fmt.Errorf("unsupported SOCKS5 address type")
+			return
+		}
+		portBytes := make([]byte, 2)
+		if _, err := io.ReadFull(reader, portBytes); err != nil {
+			errors <- err
+			return
+		}
+		targetAddress := net.JoinHostPort(host, strconv.Itoa(int(binary.BigEndian.Uint16(portBytes))))
+
+		upstreamConn, err := net.DialTimeout("tcp", upstreamAddress, 5*time.Second)
+		if err != nil {
+			errors <- err
+			return
+		}
+		defer upstreamConn.Close()
+		if _, err := clientConn.Write([]byte{5, 0, 0, 1, 0, 0, 0, 0, 0, 0}); err != nil {
+			errors <- err
+			return
+		}
+		observations <- socks5ProxyObservation{targetAddress: targetAddress}
+
+		upstreamDone := make(chan struct{})
+		go func() {
+			_, _ = io.Copy(upstreamConn, reader)
+			if tcpConn, ok := upstreamConn.(*net.TCPConn); ok {
+				_ = tcpConn.CloseWrite()
+			}
+			close(upstreamDone)
+		}()
+		_, _ = io.Copy(clientConn, upstreamConn)
+		<-upstreamDone
+	}()
+
+	return listener.Addr().String(), observations, errors
+}
+
+func TestProcessHeaderOverride_MonitorHeadersHaveFinalSafePrecedence(t *testing.T) {
+	t.Parallel()
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	info := &relaycommon.RelayInfo{
+		IsChannelTest:    true,
+		IsChannelMonitor: true,
+		MonitorHeadersOverride: map[string]string{
+			"Authorization": "Bearer forged",
+			"X-Probe-Mode":  "monitor",
+		},
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ApiKey: "channel-secret",
+			HeadersOverride: map[string]any{
+				"Authorization": "Bearer {api_key}",
+				"X-Probe-Mode":  "channel",
+			},
+		},
+	}
+
+	headers, err := processHeaderOverride(info, ctx)
+	require.NoError(t, err)
+	require.Equal(t, "Bearer channel-secret", headers["authorization"])
+	require.Equal(t, "monitor", headers["x-probe-mode"])
+}
+
+func TestDoRequest_MonitorUsesChannelHTTPProxy(t *testing.T) {
+	t.Parallel()
+
+	proxiedURLs := make(chan string, 1)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxiedURLs <- r.URL.String()
+		w.Header().Set("Content-Type", "application/json")
+		_, err := io.WriteString(w, `{"ok":true}`)
+		require.NoError(t, err)
+	}))
+	t.Cleanup(proxy.Close)
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/probe", strings.NewReader(`{}`))
+	request, err := http.NewRequest(
+		http.MethodPost,
+		"http://upstream.invalid/v1/probe",
+		strings.NewReader(`{"model":"test"}`),
+	)
+	require.NoError(t, err)
+	info := &relaycommon.RelayInfo{
+		IsChannelMonitor: true,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelSetting: dto.ChannelSettings{Proxy: proxy.URL},
+		},
+	}
+
+	response, err := doRequest(ctx, request, info)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = response.Body.Close() })
+	_, err = io.ReadAll(response.Body)
+	require.NoError(t, err)
+	require.Equal(t, "http://upstream.invalid/v1/probe", <-proxiedURLs)
+}
+
+func TestDoRequest_MonitorUsesChannelSOCKSProxy(t *testing.T) {
+	for _, scheme := range []string{"socks5", "socks5h"} {
+		t.Run(scheme, func(t *testing.T) {
+			upstreamRequests := make(chan string, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstreamRequests <- r.Host + r.URL.Path
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Connection", "close")
+				_, _ = io.WriteString(w, `{"ok":true}`)
+			}))
+			t.Cleanup(upstream.Close)
+			upstreamURL, err := url.Parse(upstream.URL)
+			require.NoError(t, err)
+			proxyAddress, observations, proxyErrors := startSOCKS5ForwardProxy(t, upstreamURL.Host)
+
+			gin.SetMode(gin.TestMode)
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/probe", strings.NewReader(`{}`))
+			request, err := http.NewRequest(
+				http.MethodPost,
+				"http://upstream.invalid:18080/v1/probe",
+				strings.NewReader(`{"model":"test"}`),
+			)
+			require.NoError(t, err)
+			request.Close = true
+			info := &relaycommon.RelayInfo{
+				IsChannelMonitor: true,
+				ChannelMeta: &relaycommon.ChannelMeta{
+					ChannelSetting: dto.ChannelSettings{Proxy: scheme + "://" + proxyAddress},
+				},
+			}
+
+			response, err := doRequest(ctx, request, info)
+			require.NoError(t, err)
+			body, err := io.ReadAll(response.Body)
+			require.NoError(t, err)
+			require.NoError(t, response.Body.Close())
+			require.JSONEq(t, `{"ok":true}`, string(body))
+			require.Equal(t, "upstream.invalid:18080", (<-observations).targetAddress)
+			require.Equal(t, "upstream.invalid:18080/v1/probe", <-upstreamRequests)
+			select {
+			case proxyErr := <-proxyErrors:
+				require.NoError(t, proxyErr)
+			default:
+			}
+		})
+	}
+}
+
+func TestWebSocketDialer_UsesChannelSOCKSProxy(t *testing.T) {
+	for _, scheme := range []string{"socks5", "socks5h"} {
+		t.Run(scheme, func(t *testing.T) {
+			upstreamErrors := make(chan error, 1)
+			upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					upstreamErrors <- err
+					return
+				}
+				defer conn.Close()
+				if err := conn.WriteMessage(websocket.TextMessage, []byte("ok")); err != nil {
+					upstreamErrors <- err
+				}
+			}))
+			t.Cleanup(upstream.Close)
+			upstreamURL, err := url.Parse(upstream.URL)
+			require.NoError(t, err)
+			proxyAddress, observations, proxyErrors := startSOCKS5ForwardProxy(t, upstreamURL.Host)
+
+			dialer, err := service.NewWebSocketDialerWithProxy(scheme+"://"+proxyAddress, 5*time.Second)
+			require.NoError(t, err)
+			conn, _, err := dialer.DialContext(
+				context.Background(),
+				"ws://upstream.invalid:18080/probe",
+				nil,
+			)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = conn.Close() })
+			messageType, message, err := conn.ReadMessage()
+			require.NoError(t, err)
+			require.Equal(t, websocket.TextMessage, messageType)
+			require.Equal(t, "ok", string(message))
+			require.Equal(t, "upstream.invalid:18080", (<-observations).targetAddress)
+			select {
+			case proxyErr := <-proxyErrors:
+				require.NoError(t, proxyErr)
+			default:
+			}
+			select {
+			case upstreamErr := <-upstreamErrors:
+				require.NoError(t, upstreamErr)
+			default:
+			}
+		})
+	}
+}
 
 func TestProcessHeaderOverride_ChannelTestSkipsPassthroughRules(t *testing.T) {
 	t.Parallel()

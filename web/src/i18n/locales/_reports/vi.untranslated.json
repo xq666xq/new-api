@@ -8,7 +8,6 @@
   "Effective resolution is about 15s (the scheduler tick).": "Effective resolution is about 15s (the scheduler tick).",
   "Enter a whole number between {{min}} and {{max}}.": "Enter a whole number between {{min}} and {{max}}.",
   "Failed to trigger probe": "Failed to trigger probe",
-  "Invalid JSON, unable to format": "Invalid JSON, unable to format",
   "Manage reusable probe templates. Applying an update re-snapshots the template onto its channels.": "Manage reusable probe templates. Applying an update re-snapshots the template onto its channels.",
   "Merged over the default headers; your values win. Hop-by-hop headers like Host and Content-Length are ignored.": "Merged over the default headers; your values win. Hop-by-hop headers like Host and Content-Length are ignored.",
   "No channels match the current filters.": "No channels match the current filters.",
@@ -16,7 +15,6 @@
   "Probe records only; forwarding traffic is counted in the stats above but not listed here.": "Probe records only; forwarding traffic is counted in the stats above but not listed here.",
   "Replace the default body entirely with the JSON below, including model/messages/contents.": "Replace the default body entirely with the JSON below, including model/messages/contents.",
   "Selecting a template copies its headers and body as a snapshot. Later template changes are not synced.": "Selecting a template copies its headers and body as a snapshot. Later template changes are not synced.",
-  "Synced from the channel list · {{configured}} configured · {{enabled}} monitoring": "Synced from the channel list · {{configured}} configured · {{enabled}} monitoring",
   "Turn probing on or off for this channel.": "Turn probing on or off for this channel.",
   "Use the endpoint default probe body as-is.": "Use the endpoint default probe body as-is.",
   "While active, no channel or model is probed. The window wraps past midnight when the start is later than the end.": "While active, no channel or model is probed. The window wraps past midnight when the start is later than the end."

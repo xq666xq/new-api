@@ -19,17 +19,142 @@ For commercial licensing, please contact support@quantumnous.com
 package controller
 
 import (
+	"errors"
+	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	relaychannel "github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
+
+const (
+	monitorBodyJSONMaxBytes = 256 << 10
+	monitorHeaderMaxCount   = 32
+)
+
+var supportedMonitorEndpointTypes = map[string]bool{
+	"auto":                              true,
+	string(constant.EndpointTypeOpenAI): true,
+	string(constant.EndpointTypeOpenAIResponse):        true,
+	string(constant.EndpointTypeOpenAIResponseCompact): true,
+	string(constant.EndpointTypeAnthropic):             true,
+	string(constant.EndpointTypeGemini):                true,
+	string(constant.EndpointTypeJinaRerank):            true,
+	string(constant.EndpointTypeImageGeneration):       true,
+	string(constant.EndpointTypeEmbeddings):            true,
+}
+
+var monitorStreamIncompatibleEndpoints = map[string]bool{
+	string(constant.EndpointTypeOpenAIResponseCompact): true,
+	string(constant.EndpointTypeJinaRerank):            true,
+	string(constant.EndpointTypeImageGeneration):       true,
+	string(constant.EndpointTypeEmbeddings):            true,
+}
+
+func normalizeMonitorRequestSettings(endpointType *string, stream *bool, headers *model.JSONValue, bodyMode *string, bodyJSON *string) error {
+	*endpointType = strings.TrimSpace(*endpointType)
+	if *endpointType == "" {
+		*endpointType = "auto"
+	}
+	if !supportedMonitorEndpointTypes[*endpointType] {
+		return fmt.Errorf("unsupported endpoint type: %s", *endpointType)
+	}
+	if monitorStreamIncompatibleEndpoints[*endpointType] {
+		*stream = false
+	}
+
+	*bodyMode = strings.TrimSpace(*bodyMode)
+	if *bodyMode == "" {
+		*bodyMode = model.MonitorBodyModeDefault
+	}
+	if *bodyMode != model.MonitorBodyModeDefault &&
+		*bodyMode != model.MonitorBodyModeMerge &&
+		*bodyMode != model.MonitorBodyModeOverride {
+		return fmt.Errorf("unsupported request body mode: %s", *bodyMode)
+	}
+	if len(*bodyJSON) > monitorBodyJSONMaxBytes {
+		return fmt.Errorf("request body cannot exceed %d bytes", monitorBodyJSONMaxBytes)
+	}
+	if *bodyMode != model.MonitorBodyModeDefault {
+		if strings.TrimSpace(*bodyJSON) == "" {
+			return errors.New("request body JSON is required for merge or override mode")
+		}
+		var object map[string]any
+		if err := common.UnmarshalJsonStr(*bodyJSON, &object); err != nil {
+			return fmt.Errorf("request body must be a valid JSON object: %w", err)
+		}
+		if object == nil {
+			return errors.New("request body must be a JSON object")
+		}
+	}
+
+	parsedHeaders := make([]model.ChannelMonitorHeader, 0)
+	if len(*headers) > 0 {
+		if err := common.Unmarshal(*headers, &parsedHeaders); err != nil {
+			return errors.New("custom headers must be an array")
+		}
+	}
+	if len(parsedHeaders) > monitorHeaderMaxCount {
+		return fmt.Errorf("custom headers cannot exceed %d entries", monitorHeaderMaxCount)
+	}
+	normalizedHeaders := make([]model.ChannelMonitorHeader, 0, len(parsedHeaders))
+	indexes := make(map[string]int, len(parsedHeaders))
+	for _, header := range parsedHeaders {
+		key := strings.TrimSpace(header.Key)
+		if !validMonitorHeaderName(key) {
+			return fmt.Errorf("invalid custom header name: %s", key)
+		}
+		if relaychannel.IsMonitorHeaderProtected(key) {
+			return fmt.Errorf("custom header is protected and cannot be overridden: %s", key)
+		}
+		if strings.ContainsAny(header.Value, "\r\n") {
+			return fmt.Errorf("custom header value contains a line break: %s", key)
+		}
+		if len(header.Value) > 8192 {
+			return fmt.Errorf("custom header value is too long: %s", key)
+		}
+		canonicalKey := http.CanonicalHeaderKey(key)
+		lookupKey := strings.ToLower(canonicalKey)
+		entry := model.ChannelMonitorHeader{Key: canonicalKey, Value: header.Value}
+		if index, ok := indexes[lookupKey]; ok {
+			normalizedHeaders[index] = entry
+			continue
+		}
+		indexes[lookupKey] = len(normalizedHeaders)
+		normalizedHeaders = append(normalizedHeaders, entry)
+	}
+	data, err := common.Marshal(normalizedHeaders)
+	if err != nil {
+		return err
+	}
+	*headers = model.JSONValue(data)
+	return nil
+}
+
+func validMonitorHeaderName(name string) bool {
+	if name == "" || len(name) > 128 {
+		return false
+	}
+	for _, char := range []byte(name) {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || strings.ContainsRune("!#$%&'*+-.^_`|~", rune(char)) {
+			continue
+		}
+		return false
+	}
+	return true
+}
 
 func GetChannelMonitorStatus(c *gin.Context) {
 	rows, err := model.GetChannelStatusRows(c.DefaultQuery("range", "1h"), time.Now())
@@ -294,13 +419,6 @@ func TriggerChannelMonitorNow(c *gin.Context) {
 	common.ApiSuccess(c, nil)
 }
 
-// validMonitorBodyModes 限定请求体处理模式的合法取值。
-var validMonitorBodyModes = map[string]bool{
-	"default":  true,
-	"merge":    true,
-	"override": true,
-}
-
 const monitorQuestionMaxLength = 1000
 
 // channelManagedModelState 是列表里单个模型的托管运行态投影：策略当前把它
@@ -366,7 +484,9 @@ func intersectModels(selected, available []string) []string {
 	return result
 }
 
-// GetChannelMonitorList 返回与渠道列表同步的监控列表，每行携带（可能为空的）监控配置。
+// GetChannelMonitorList 返回监控列表。只有在渠道列表里保存过检测配置（测试端点/
+// 模版）的渠道才会出现——列表是监控配置表的投影，不再自动同步全部渠道，因此删除
+// 一条监控配置就等于把该渠道移出列表。
 func GetChannelMonitorList(c *gin.Context) {
 	channels, err := model.GetChannelMonitorListItems()
 	if err != nil {
@@ -392,19 +512,21 @@ func GetChannelMonitorList(c *gin.Context) {
 		managedStates = map[string]*model.ChannelManagedState{}
 	}
 
-	rows := make([]channelMonitorRow, 0, len(channels))
+	rows := make([]channelMonitorRow, 0, len(configs))
 	for _, ch := range channels {
-		row := channelMonitorRow{
-			Id:       ch.Id,
-			Name:     ch.Name,
-			Type:     ch.Type,
-			Group:    ch.Group,
-			Models:   splitModels(ch.Models),
-			Priority: ch.Priority,
+		cfg, configured := configByChannel[ch.Id]
+		if !configured {
+			continue
 		}
-		if cfg, ok := configByChannel[ch.Id]; ok {
-			row.Config = cfg
-			row.LastCheckedAt = cfg.LastCheckedAt
+		row := channelMonitorRow{
+			Id:            ch.Id,
+			Name:          ch.Name,
+			Type:          ch.Type,
+			Group:         ch.Group,
+			Models:        splitModels(ch.Models),
+			Priority:      ch.Priority,
+			Config:        cfg,
+			LastCheckedAt: cfg.LastCheckedAt,
 		}
 		// Project the managed state for each monitored model, if any, into the
 		// list-facing view so the console can show per-model ban/priority status.
@@ -431,16 +553,47 @@ func GetChannelMonitorList(c *gin.Context) {
 	common.ApiSuccess(c, rows)
 }
 
-// normalizeMonitorConfig 校验并规整监控配置的字段取值。
-func normalizeMonitorConfig(cfg *model.ChannelMonitorConfig) string {
+func resolveMonitorConfigTemplate(cfg *model.ChannelMonitorConfig) error {
+	cfg.TemplateName = strings.TrimSpace(cfg.TemplateName)
+	if cfg.TemplateId <= 0 && cfg.TemplateName == "" {
+		cfg.TemplateId = 0
+		return nil
+	}
+
+	var template *model.MonitorTemplate
+	var err error
+	if cfg.TemplateId > 0 {
+		template, err = model.GetMonitorTemplate(cfg.TemplateId)
+	} else {
+		template, err = model.GetMonitorTemplateByName(cfg.TemplateName)
+	}
+	if err != nil {
+		return err
+	}
+	if template == nil {
+		return errors.New("monitor template does not exist")
+	}
+	cfg.TemplateId = template.Id
+	cfg.TemplateName = template.Name
+	return nil
+}
+
+// normalizeMonitorConfig validates request settings and normalizes scheduler fields.
+func normalizeMonitorConfig(cfg *model.ChannelMonitorConfig) error {
 	if cfg.ChannelId <= 0 {
-		return "缺少渠道 ID"
+		return errors.New("缺少渠道 ID")
 	}
-	if cfg.EndpointType == "" {
-		cfg.EndpointType = "auto"
+	if err := normalizeMonitorRequestSettings(
+		&cfg.EndpointType,
+		&cfg.Stream,
+		&cfg.Headers,
+		&cfg.BodyMode,
+		&cfg.BodyJson,
+	); err != nil {
+		return err
 	}
-	if !validMonitorBodyModes[cfg.BodyMode] {
-		cfg.BodyMode = "default"
+	if err := resolveMonitorConfigTemplate(cfg); err != nil {
+		return err
 	}
 	if cfg.IntervalSeconds < model.MonitorMinIntervalSeconds {
 		cfg.IntervalSeconds = model.MonitorMinIntervalSeconds
@@ -457,9 +610,33 @@ func normalizeMonitorConfig(cfg *model.ChannelMonitorConfig) string {
 	}
 	cfg.Remark = strings.TrimSpace(cfg.Remark)
 	if len([]rune(cfg.Remark)) > 255 {
-		return "备注不能超过 255 个字符"
+		return errors.New("备注不能超过 255 个字符")
 	}
-	return ""
+	return nil
+}
+
+func GetChannelMonitorConfig(c *gin.Context) {
+	channelID, err := strconv.Atoi(c.Param("id"))
+	if err != nil || channelID <= 0 {
+		common.ApiErrorMsg(c, "invalid channel ID")
+		return
+	}
+	config, err := model.GetChannelMonitorConfig(channelID)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if config != nil && config.TemplateId == 0 && strings.TrimSpace(config.TemplateName) != "" {
+		template, err := model.GetMonitorTemplateByName(config.TemplateName)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		if template != nil {
+			config.TemplateId = template.Id
+		}
+	}
+	common.ApiSuccess(c, config)
 }
 
 // SaveChannelMonitorConfig 新增或更新单个渠道的监控配置。
@@ -469,8 +646,8 @@ func SaveChannelMonitorConfig(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if msg := normalizeMonitorConfig(&cfg); msg != "" {
-		common.ApiErrorMsg(c, msg)
+	if err := normalizeMonitorConfig(&cfg); err != nil {
+		common.ApiErrorMsg(c, err.Error())
 		return
 	}
 	// 确认渠道存在，避免为不存在的渠道写入孤立配置。
@@ -489,6 +666,99 @@ func SaveChannelMonitorConfig(c *gin.Context) {
 		return
 	}
 	common.ApiSuccess(c, &cfg)
+}
+
+type channelDetectionConfigRequest struct {
+	Id           int             `json:"id"`
+	ChannelId    int             `json:"channel_id"`
+	EndpointType string          `json:"endpoint_type"`
+	Stream       bool            `json:"stream"`
+	TemplateId   int             `json:"template_id"`
+	Headers      model.JSONValue `json:"headers"`
+	BodyMode     string          `json:"body_mode"`
+	BodyJson     string          `json:"body_json"`
+}
+
+// DeleteChannelMonitorConfig removes one channel from the monitor list. Because
+// the list is a projection of the monitor config table, dropping the config row is
+// the removal. The model layer also clears managed state and restores the ability
+// rows, so the channel cache must be rebuilt for the overlay to forget any ban or
+// speed-tier priority it was still serving.
+func DeleteChannelMonitorConfig(c *gin.Context) {
+	channelID, err := strconv.Atoi(c.Param("id"))
+	if err != nil || channelID <= 0 {
+		common.ApiErrorMsg(c, "invalid channel ID")
+		return
+	}
+	if err := model.DeleteChannelMonitorConfigByChannel(channelID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			common.ApiErrorMsg(c, "monitor config does not exist")
+			return
+		}
+		common.ApiError(c, err)
+		return
+	}
+	model.InitChannelCache()
+	common.ApiSuccess(c, nil)
+}
+
+// SaveChannelDetectionConfig updates only the request snapshot used by the
+// channel dialog. Existing scheduler, model-selection and managed-policy fields
+// are deliberately preserved.
+func SaveChannelDetectionConfig(c *gin.Context) {
+	var request channelDetectionConfigRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if request.ChannelId <= 0 {
+		common.ApiErrorMsg(c, "invalid channel ID")
+		return
+	}
+	channel, err := model.GetChannelById(request.ChannelId, false)
+	if err != nil || channel == nil {
+		common.ApiErrorMsg(c, "channel does not exist")
+		return
+	}
+
+	config, err := model.GetChannelMonitorConfig(request.ChannelId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if config == nil {
+		config = &model.ChannelMonitorConfig{
+			ChannelId:       request.ChannelId,
+			IntervalSeconds: 60,
+		}
+	}
+	config.EndpointType = request.EndpointType
+	config.Stream = request.Stream
+	config.TemplateId = request.TemplateId
+	config.TemplateName = ""
+	config.Headers = request.Headers
+	config.BodyMode = request.BodyMode
+	config.BodyJson = request.BodyJson
+
+	if err := normalizeMonitorRequestSettings(
+		&config.EndpointType,
+		&config.Stream,
+		&config.Headers,
+		&config.BodyMode,
+		&config.BodyJson,
+	); err != nil {
+		common.ApiErrorMsg(c, err.Error())
+		return
+	}
+	if err := resolveMonitorConfigTemplate(config); err != nil {
+		common.ApiErrorMsg(c, err.Error())
+		return
+	}
+	if err := model.UpsertChannelMonitorConfig(config); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, config)
 }
 
 func normalizeMonitorQuestion(question *model.MonitorQuestion) string {
@@ -606,6 +876,27 @@ func GetMonitorTemplates(c *gin.Context) {
 	common.ApiSuccess(c, templates)
 }
 
+func normalizeMonitorTemplate(template *model.MonitorTemplate) error {
+	template.Name = strings.TrimSpace(template.Name)
+	if template.Name == "" {
+		return errors.New("template name is required")
+	}
+	if utf8.RuneCountInString(template.Name) > 64 {
+		return errors.New("template name cannot exceed 64 characters")
+	}
+	template.Description = strings.TrimSpace(template.Description)
+	if utf8.RuneCountInString(template.Description) > 255 {
+		return errors.New("template description cannot exceed 255 characters")
+	}
+	return normalizeMonitorRequestSettings(
+		&template.EndpointType,
+		&template.Stream,
+		&template.Headers,
+		&template.BodyMode,
+		&template.BodyJson,
+	)
+}
+
 // CreateMonitorTemplate 创建监控模版。
 func CreateMonitorTemplate(c *gin.Context) {
 	var tpl model.MonitorTemplate
@@ -613,8 +904,8 @@ func CreateMonitorTemplate(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if strings.TrimSpace(tpl.Name) == "" {
-		common.ApiErrorMsg(c, "模版名称不能为空")
+	if err := normalizeMonitorTemplate(&tpl); err != nil {
+		common.ApiErrorMsg(c, err.Error())
 		return
 	}
 	if dup, err := model.IsMonitorTemplateNameDuplicated(0, tpl.Name); err != nil {
@@ -624,11 +915,7 @@ func CreateMonitorTemplate(c *gin.Context) {
 		common.ApiErrorMsg(c, "模版名称已存在")
 		return
 	}
-	if !validMonitorBodyModes[tpl.BodyMode] {
-		tpl.BodyMode = "merge"
-	}
-	tpl.Id = 0
-	if err := tpl.Insert(); err != nil {
+	if err := model.InsertMonitorTemplate(&tpl); err != nil {
 		common.ApiError(c, err)
 		return
 	}
@@ -642,12 +929,20 @@ func UpdateMonitorTemplate(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if tpl.Id == 0 {
+	if pathID := strings.TrimSpace(c.Param("id")); pathID != "" {
+		id, err := strconv.Atoi(pathID)
+		if err != nil || id <= 0 {
+			common.ApiErrorMsg(c, "invalid template ID")
+			return
+		}
+		tpl.Id = id
+	}
+	if tpl.Id <= 0 {
 		common.ApiErrorMsg(c, "缺少模版 ID")
 		return
 	}
-	if strings.TrimSpace(tpl.Name) == "" {
-		common.ApiErrorMsg(c, "模版名称不能为空")
+	if err := normalizeMonitorTemplate(&tpl); err != nil {
+		common.ApiErrorMsg(c, err.Error())
 		return
 	}
 	if dup, err := model.IsMonitorTemplateNameDuplicated(tpl.Id, tpl.Name); err != nil {
@@ -657,10 +952,11 @@ func UpdateMonitorTemplate(c *gin.Context) {
 		common.ApiErrorMsg(c, "模版名称已存在")
 		return
 	}
-	if !validMonitorBodyModes[tpl.BodyMode] {
-		tpl.BodyMode = "merge"
-	}
-	if err := tpl.Update(); err != nil {
+	if err := model.UpdateMonitorTemplate(&tpl); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			common.ApiErrorMsg(c, "模版不存在")
+			return
+		}
 		common.ApiError(c, err)
 		return
 	}
@@ -670,8 +966,8 @@ func UpdateMonitorTemplate(c *gin.Context) {
 // DeleteMonitorTemplate 删除监控模版。
 func DeleteMonitorTemplate(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		common.ApiError(c, err)
+	if err != nil || id <= 0 {
+		common.ApiErrorMsg(c, "invalid template ID")
 		return
 	}
 	if err := model.DeleteMonitorTemplateByID(id); err != nil {
@@ -684,8 +980,8 @@ func DeleteMonitorTemplate(c *gin.Context) {
 // ApplyMonitorTemplate 把指定模版的快照重新应用到所有引用它的渠道配置。
 func ApplyMonitorTemplate(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		common.ApiError(c, err)
+	if err != nil || id <= 0 {
+		common.ApiErrorMsg(c, "invalid template ID")
 		return
 	}
 	tpl, err := model.GetMonitorTemplate(id)

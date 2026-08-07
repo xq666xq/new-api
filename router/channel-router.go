@@ -47,6 +47,15 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 			)
 		}
 	}
+
+	channelMonitorRoute := apiRouter.Group("/channel_monitor")
+	channelMonitorRoute.Use(middleware.AdminAuth())
+	for _, route := range channelMonitorPermissionRoutes {
+		channelMonitorRoute.Handle(route.method, route.path,
+			middleware.RequirePermission(route.permission),
+			route.handler,
+		)
+	}
 }
 
 var channelPermissionRoutes = []permissionRoute{
@@ -89,4 +98,10 @@ var channelPermissionRoutes = []permissionRoute{
 	{method: http.MethodPost, path: "/upstream_updates/apply_all", permission: authz.ChannelWrite, handler: controller.ApplyAllChannelUpstreamModelUpdates},
 	{method: http.MethodPost, path: "/upstream_updates/detect", permission: authz.ChannelOperate, handler: controller.DetectChannelUpstreamModelUpdates},
 	{method: http.MethodPost, path: "/upstream_updates/detect_all", permission: authz.ChannelOperate, handler: controller.DetectAllChannelUpstreamModelUpdates},
+}
+
+var channelMonitorPermissionRoutes = []permissionRoute{
+	{method: http.MethodGet, path: "/config/:id", permission: authz.ChannelRead, handler: controller.GetChannelMonitorConfig},
+	{method: http.MethodPut, path: "/config", permission: authz.ChannelWrite, handler: controller.SaveChannelDetectionConfig},
+	{method: http.MethodPut, path: "/templates/:id", permission: authz.ChannelWrite, handler: controller.UpdateMonitorTemplate},
 }

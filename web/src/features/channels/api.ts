@@ -25,6 +25,8 @@ import type {
   BatchSetTagParams,
   Channel,
   ChannelBalanceResponse,
+  ChannelMonitorConfig,
+  ChannelMonitorProbeResult,
   ChannelOpsResponse,
   ChannelTestResponse,
   CopyChannelParams,
@@ -35,10 +37,74 @@ import type {
   GetChannelsResponse,
   MultiKeyManageParams,
   MultiKeyStatusResponse,
+  MonitorBodyMode,
+  MonitorHeader,
+  MonitorTemplate,
   SearchChannelsParams,
   SearchChannelsResponse,
   TagOperationParams,
 } from './types'
+
+type ApiWireResponse<T> = {
+  success: boolean
+  message?: string
+  data?: T
+}
+
+type RawMonitorHeader = { key: string; value: string }
+
+type RawMonitorRequestSettings = {
+  endpoint_type?: string
+  stream?: boolean
+  headers?: RawMonitorHeader[]
+  body_mode?: string
+  body_json?: string
+}
+
+type RawChannelMonitorConfig = RawMonitorRequestSettings & {
+  id?: number
+  channel_id?: number
+  template_id?: number
+  updated_time?: number
+}
+
+type RawMonitorTemplate = RawMonitorRequestSettings & {
+  id?: number
+  name?: string
+  description?: string
+  updated_time?: number
+}
+
+type RawMonitorProbeTrace = {
+  request_method?: string
+  request_url?: string
+  request_headers?: Record<string, string[]>
+  request_body?: string
+  request_body_truncated?: boolean
+  request_write_error?: string
+  response_url?: string
+  response_status_code?: number
+  response_status?: string
+  response_headers?: Record<string, string[]>
+  response_body?: string
+  response_body_truncated?: boolean
+  body_limit_bytes?: number
+}
+
+type RawChannelMonitorProbeResult = {
+  model_name?: string
+  endpoint_type?: string
+  stream?: boolean
+  question_id?: number
+  question_content?: string
+  success?: boolean
+  latency_ms?: number
+  ttft_ms?: number
+  status_code?: number
+  error_message?: string
+  checked_at?: number
+  trace?: RawMonitorProbeTrace
+}
 
 const channelActionConfig = (
   config: ApiRequestConfig = {}
@@ -648,4 +714,198 @@ export async function getPrefillGroups(
 }> {
   const res = await api.get('/api/prefill_group', { params: { type } })
   return res.data
+}
+
+function normalizeMonitorBodyMode(value?: string): MonitorBodyMode {
+  if (value === 'merge' || value === 'override') return value
+  return 'default'
+}
+
+function toMonitorHeaders(headers?: RawMonitorHeader[]): MonitorHeader[] {
+  return (headers ?? []).map((header, index) => ({
+    id: `${index}-${header.key}`,
+    key: header.key,
+    value: header.value,
+  }))
+}
+
+function monitorHeadersToWire(headers: MonitorHeader[]): RawMonitorHeader[] {
+  return headers.map((header) => ({ key: header.key, value: header.value }))
+}
+
+function toChannelMonitorConfig(
+  raw: RawChannelMonitorConfig
+): ChannelMonitorConfig {
+  return {
+    id: raw.id ?? 0,
+    channelId: raw.channel_id ?? 0,
+    endpointType: raw.endpoint_type || 'auto',
+    stream: raw.stream ?? false,
+    templateId: raw.template_id ?? 0,
+    headers: toMonitorHeaders(raw.headers),
+    bodyMode: normalizeMonitorBodyMode(raw.body_mode),
+    bodyJson: raw.body_json ?? '',
+    updatedTime: raw.updated_time ?? 0,
+  }
+}
+
+function monitorConfigToWire(
+  config: ChannelMonitorConfig
+): RawChannelMonitorConfig {
+  return {
+    id: config.id,
+    channel_id: config.channelId,
+    endpoint_type: config.endpointType,
+    stream: config.stream,
+    template_id: config.templateId,
+    headers: monitorHeadersToWire(config.headers),
+    body_mode: config.bodyMode,
+    body_json: config.bodyJson,
+  }
+}
+
+function toMonitorTemplate(raw: RawMonitorTemplate): MonitorTemplate {
+  return {
+    id: raw.id ?? 0,
+    name: raw.name ?? '',
+    description: raw.description ?? '',
+    endpointType: raw.endpoint_type || 'auto',
+    stream: raw.stream ?? false,
+    headers: toMonitorHeaders(raw.headers),
+    bodyMode: normalizeMonitorBodyMode(raw.body_mode),
+    bodyJson: raw.body_json ?? '',
+    updatedTime: raw.updated_time ?? 0,
+  }
+}
+
+function monitorTemplateToWire(template: MonitorTemplate): RawMonitorTemplate {
+  return {
+    id: template.id,
+    name: template.name,
+    description: template.description,
+    endpoint_type: template.endpointType,
+    stream: template.stream,
+    headers: monitorHeadersToWire(template.headers),
+    body_mode: template.bodyMode,
+    body_json: template.bodyJson,
+  }
+}
+
+export async function getChannelMonitorConfig(
+  channelId: number
+): Promise<ChannelMonitorConfig | null> {
+  const res = await api.get<ApiWireResponse<RawChannelMonitorConfig | null>>(
+    `/api/channel_monitor/config/${channelId}`,
+    channelActionConfig()
+  )
+  if (!res.data.success) throw new Error(res.data.message || 'Request failed')
+  return res.data.data ? toChannelMonitorConfig(res.data.data) : null
+}
+
+export async function saveChannelMonitorConfig(
+  config: ChannelMonitorConfig
+): Promise<ChannelMonitorConfig> {
+  const res = await api.put<ApiWireResponse<RawChannelMonitorConfig>>(
+    '/api/channel_monitor/config',
+    monitorConfigToWire(config),
+    channelActionConfig()
+  )
+  if (!res.data.success || !res.data.data) {
+    throw new Error(res.data.message || 'Request failed')
+  }
+  return toChannelMonitorConfig(res.data.data)
+}
+
+export async function getMonitorTemplates(): Promise<MonitorTemplate[]> {
+  const res = await api.get<ApiWireResponse<RawMonitorTemplate[]>>(
+    '/api/channel_monitor/templates',
+    channelActionConfig()
+  )
+  if (!res.data.success) throw new Error(res.data.message || 'Request failed')
+  return (res.data.data ?? []).map(toMonitorTemplate)
+}
+
+export async function createMonitorTemplate(
+  template: MonitorTemplate
+): Promise<MonitorTemplate> {
+  const res = await api.post<ApiWireResponse<RawMonitorTemplate>>(
+    '/api/channel_monitor/templates',
+    monitorTemplateToWire(template),
+    channelActionConfig()
+  )
+  if (!res.data.success || !res.data.data) {
+    throw new Error(res.data.message || 'Request failed')
+  }
+  return toMonitorTemplate(res.data.data)
+}
+
+export async function updateMonitorTemplate(
+  template: MonitorTemplate
+): Promise<MonitorTemplate> {
+  const res = await api.put<ApiWireResponse<RawMonitorTemplate>>(
+    `/api/channel_monitor/templates/${template.id}`,
+    monitorTemplateToWire(template),
+    channelActionConfig()
+  )
+  if (!res.data.success || !res.data.data) {
+    throw new Error(res.data.message || 'Request failed')
+  }
+  return toMonitorTemplate(res.data.data)
+}
+
+export async function deleteMonitorTemplate(id: number): Promise<void> {
+  const res = await api.delete<ApiWireResponse<null>>(
+    `/api/channel_monitor/templates/${id}`,
+    channelActionConfig()
+  )
+  if (!res.data.success) throw new Error(res.data.message || 'Request failed')
+}
+
+export async function probeChannelNow(
+  channelId: number,
+  modelName: string
+): Promise<ChannelMonitorProbeResult> {
+  const res = await api.post<
+    ApiWireResponse<
+      RawChannelMonitorProbeResult | RawChannelMonitorProbeResult[]
+    >
+  >(
+    '/api/channel_monitor/probe',
+    { channel_id: channelId, model_name: modelName },
+    channelActionConfig({ headers: { 'Cache-Control': 'no-store' } })
+  )
+  const payload = res.data.data
+  const raw = Array.isArray(payload) ? payload[0] : payload
+  if (!res.data.success || !raw) {
+    throw new Error(res.data.message || 'Request failed')
+  }
+  const trace = raw.trace ?? {}
+  return {
+    modelName: raw.model_name ?? modelName,
+    endpointType: raw.endpoint_type || 'auto',
+    stream: raw.stream ?? false,
+    questionId: raw.question_id ?? 0,
+    questionContent: raw.question_content ?? '',
+    success: raw.success ?? false,
+    latencyMs: raw.latency_ms ?? 0,
+    ttftMs: raw.ttft_ms ?? 0,
+    statusCode: raw.status_code ?? 0,
+    errorMessage: raw.error_message ?? '',
+    checkedAt: raw.checked_at ?? 0,
+    trace: {
+      requestMethod: trace.request_method ?? '',
+      requestUrl: trace.request_url ?? '',
+      requestHeaders: trace.request_headers ?? {},
+      requestBody: trace.request_body ?? '',
+      requestBodyTruncated: trace.request_body_truncated ?? false,
+      requestWriteError: trace.request_write_error ?? '',
+      responseUrl: trace.response_url ?? '',
+      responseStatusCode: trace.response_status_code ?? 0,
+      responseStatus: trace.response_status ?? '',
+      responseHeaders: trace.response_headers ?? {},
+      responseBody: trace.response_body ?? '',
+      responseBodyTruncated: trace.response_body_truncated ?? false,
+      bodyLimitBytes: trace.body_limit_bytes ?? 0,
+    },
+  }
 }

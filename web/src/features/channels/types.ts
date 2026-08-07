@@ -192,6 +192,69 @@ export interface ChannelTestResponse {
   }
 }
 
+export type MonitorBodyMode = 'default' | 'merge' | 'override'
+
+export interface MonitorHeader {
+  id: string
+  key: string
+  value: string
+}
+
+export interface ChannelMonitorConfig {
+  id: number
+  channelId: number
+  endpointType: string
+  stream: boolean
+  templateId: number
+  headers: MonitorHeader[]
+  bodyMode: MonitorBodyMode
+  bodyJson: string
+  updatedTime: number
+}
+
+export interface MonitorTemplate {
+  id: number
+  name: string
+  description: string
+  endpointType: string
+  stream: boolean
+  headers: MonitorHeader[]
+  bodyMode: MonitorBodyMode
+  bodyJson: string
+  updatedTime: number
+}
+
+export interface MonitorProbeTrace {
+  requestMethod: string
+  requestUrl: string
+  requestHeaders: Record<string, string[]>
+  requestBody: string
+  requestBodyTruncated: boolean
+  requestWriteError: string
+  responseUrl: string
+  responseStatusCode: number
+  responseStatus: string
+  responseHeaders: Record<string, string[]>
+  responseBody: string
+  responseBodyTruncated: boolean
+  bodyLimitBytes: number
+}
+
+export interface ChannelMonitorProbeResult {
+  modelName: string
+  endpointType: string
+  stream: boolean
+  questionId: number
+  questionContent: string
+  success: boolean
+  latencyMs: number
+  ttftMs: number
+  statusCode: number
+  errorMessage: string
+  checkedAt: number
+  trace: MonitorProbeTrace
+}
+
 export interface ChannelBalanceResponse {
   success: boolean
   message?: string

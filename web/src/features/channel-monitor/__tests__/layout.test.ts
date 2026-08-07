@@ -19,7 +19,12 @@ For commercial licensing, please contact support@quantumnous.com
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import { channelMonitorColumns, channelMonitorTableClassName } from '../layout'
+import {
+  channelMonitorColumns,
+  channelMonitorTableClassName,
+  pinnedActionsCellClassName,
+  pinnedActionsHeadClassName,
+} from '../layout'
 
 describe('channel monitor table layout', () => {
   test('keeps stable column order and a fixed scrollable table width', () => {
@@ -38,10 +43,10 @@ describe('channel monitor table layout', () => {
     )
     assert.equal(
       channelMonitorColumns.reduce((total, column) => total + column.width, 0),
-      1520
+      1560
     )
     assert.match(channelMonitorTableClassName, /table-fixed/)
-    assert.match(channelMonitorTableClassName, /min-w-\[1520px\]/)
+    assert.match(channelMonitorTableClassName, /min-w-\[1560px\]/)
   })
 
   test('gives monitoring more room than hosting and remark', () => {
@@ -57,10 +62,30 @@ describe('channel monitor table layout', () => {
       enabled: 84,
       remark: 140,
       strategy: 220,
-      actions: 140,
+      actions: 180,
     })
     assert.ok(widths.monitoring > widths.hosting)
     assert.ok(widths.monitoring > widths.remark)
     assert.ok(widths.models >= widths.monitoring)
+  })
+
+  // The actions column is frozen by hand rather than by DataTableView, so these
+  // classes must keep matching getPinnedColumnClassName in
+  // components/data-table/core/column-pinning.ts — otherwise the monitor table
+  // silently stops freezing while the channel list still does.
+  test('pins the actions column to the right edge on header and cells', () => {
+    for (const className of [
+      pinnedActionsHeadClassName,
+      pinnedActionsCellClassName,
+    ]) {
+      assert.match(className, /\bsticky\b/)
+      assert.match(className, /\bright-0\b/)
+      assert.match(className, /shadow-\[-8px_0_10px_-10px_hsl\(var\(--foreground\)\)\]/)
+    }
+    // The header must stack above pinned cells so a scrolled row cannot cover it.
+    assert.match(pinnedActionsHeadClassName, /\bz-30\b/)
+    assert.match(pinnedActionsCellClassName, /\bz-10\b/)
+    // An opaque cell background is what actually hides the columns scrolling under it.
+    assert.match(pinnedActionsCellClassName, /\bbg-background\b/)
   })
 })

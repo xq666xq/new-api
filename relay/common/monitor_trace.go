@@ -5,13 +5,17 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
+	"strings"
 	"sync"
 )
 
 // MonitorProbeTraceBodyLimit bounds the one-time request/response payload kept
 // in memory for an administrator-triggered probe. Scheduled probes leave
 // MonitorTrace nil and pay no capture cost.
-const MonitorProbeTraceBodyLimit = 1 << 20
+const MonitorProbeTraceBodyLimit = 256 << 10
+
+const monitorTraceRedacted = "[REDACTED]"
 
 // MonitorProbeTraceSnapshot is the JSON-safe, immutable view returned to the
 // administrator after a manual probe. It is never persisted by the model layer.
@@ -193,12 +197,12 @@ func (t *MonitorProbeTrace) Snapshot() MonitorProbeTraceSnapshot {
 	}
 	return MonitorProbeTraceSnapshot{
 		RequestMethod:         t.requestMethod,
-		RequestURL:            t.requestURL,
+		RequestURL:            redactMonitorTraceURL(t.requestURL),
 		RequestHeaders:        cloneMonitorTraceHeaders(requestHeaders),
 		RequestBody:           t.requestBody.String(),
 		RequestBodyTruncated:  t.requestBodyCut,
 		RequestWriteError:     t.requestWriteError,
-		ResponseURL:           t.responseURL,
+		ResponseURL:           redactMonitorTraceURL(t.responseURL),
 		ResponseStatusCode:    t.responseCode,
 		ResponseStatus:        t.responseStatus,
 		ResponseHeaders:       cloneMonitorTraceHeaders(t.responseHeaders),
@@ -211,7 +215,52 @@ func (t *MonitorProbeTrace) Snapshot() MonitorProbeTraceSnapshot {
 func cloneMonitorTraceHeaders(headers http.Header) map[string][]string {
 	cloned := make(map[string][]string, len(headers))
 	for key, values := range headers {
+		if isSensitiveMonitorHeader(key) {
+			cloned[key] = []string{monitorTraceRedacted}
+			continue
+		}
 		cloned[key] = append([]string(nil), values...)
 	}
 	return cloned
+}
+
+func isSensitiveMonitorHeader(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "cookie" || name == "set-cookie" || name == "api-key" {
+		return true
+	}
+	if strings.Contains(name, "authorization") || strings.HasSuffix(name, "-api-key") {
+		return true
+	}
+	return strings.HasSuffix(name, "-access-token") || strings.HasSuffix(name, "-auth-token")
+}
+
+func redactMonitorTraceURL(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	query := parsed.Query()
+	for key := range query {
+		if isSensitiveMonitorQueryKey(key) {
+			query.Set(key, monitorTraceRedacted)
+		}
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func isSensitiveMonitorQueryKey(name string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	normalized = strings.NewReplacer("-", "", "_", "", ".", "").Replace(normalized)
+	switch normalized {
+	case "key", "apikey", "token", "accesstoken", "authtoken", "password", "passwd":
+		return true
+	}
+	return strings.Contains(normalized, "secret") ||
+		strings.Contains(normalized, "signature") ||
+		strings.Contains(normalized, "credential")
 }

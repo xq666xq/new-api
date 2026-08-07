@@ -25,12 +25,14 @@ import {
   Settings2,
   ShieldCheck,
   Star,
+  Trash2,
   Zap,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { SectionPageLayout } from '@/components/layout'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -61,6 +63,7 @@ import {
   applyMonitorTemplate,
   createMonitorQuestion,
   createMonitorTemplate,
+  deleteChannelMonitorConfig,
   deleteMonitorQuestion,
   deleteMonitorTemplate,
   getChannelMonitorList,
@@ -84,7 +87,12 @@ import { ManualProbeDialog } from './components/manual-probe-dialog'
 import { MonitorConfigDialog } from './components/monitor-config-dialog'
 import { QuestionLibraryDialog } from './components/question-library-dialog'
 import { TemplateManagerDialog } from './components/template-manager-dialog'
-import { channelMonitorColumns, channelMonitorTableClassName } from './layout'
+import {
+  channelMonitorColumns,
+  channelMonitorTableClassName,
+  pinnedActionsCellClassName,
+  pinnedActionsHeadClassName,
+} from './layout'
 import { canRunManualProbe, getManualProbeModels } from './probe-availability'
 import type {
   ChannelMonitorRow,
@@ -486,6 +494,9 @@ export function ChannelMonitor() {
   const [managingPolicy, setManagingPolicy] = useState(false)
   const [managingRecommendations, setManagingRecommendations] = useState(false)
   const [probing, setProbing] = useState<ChannelMonitorRow | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<ChannelMonitorRow | null>(
+    null
+  )
   const [probeModel, setProbeModel] = useState('')
 
   const { data: rows = [], isLoading } = useQuery({
@@ -610,6 +621,22 @@ export function ChannelMonitor() {
     onSuccess: () => {
       toast.success(t('Monitoring config saved'))
       invalidateList()
+    },
+  })
+
+  const removeConfig = useMutation({
+    mutationFn: (channelId: number) => deleteChannelMonitorConfig(channelId),
+    onSuccess: () => {
+      toast.success(t('Removed from monitoring'))
+      setPendingDelete(null)
+      invalidateList()
+    },
+    onError: (error) => {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : t('Failed to remove from monitoring')
+      )
     },
   })
 
@@ -805,7 +832,7 @@ export function ChannelMonitor() {
         <div className='flex flex-col gap-4'>
           <p className='text-muted-foreground text-sm'>
             {t(
-              'Synced from the channel list · {{configured}} configured · {{enabled}} monitoring',
+              'Channels with a detection config · {{configured}} configured · {{enabled}} monitoring',
               { configured: configuredCount, enabled: enabledCount }
             )}
           </p>
@@ -828,7 +855,11 @@ export function ChannelMonitor() {
                   <TableHead className='text-center'>{t('Enabled')}</TableHead>
                   <TableHead>{t('Remark')}</TableHead>
                   <TableHead>{t('Strategy')}</TableHead>
-                  <TableHead className='text-right'>{t('Actions')}</TableHead>
+                  <TableHead
+                    className={cn('text-right', pinnedActionsHeadClassName)}
+                  >
+                    {t('Actions')}
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -848,7 +879,7 @@ export function ChannelMonitor() {
                       colSpan={8}
                       className='text-muted-foreground py-8 text-center text-sm'
                     >
-                      {t('No channels')}
+                      {t('No channels have a detection config yet')}
                     </TableCell>
                   </TableRow>
                 )}
@@ -940,7 +971,9 @@ export function ChannelMonitor() {
                           </span>
                         )}
                       </TableCell>
-                      <TableCell className='text-right'>
+                      <TableCell
+                        className={cn('text-right', pinnedActionsCellClassName)}
+                      >
                         <div className='flex items-center justify-end gap-1.5'>
                           <Tooltip>
                             <TooltipTrigger
@@ -1014,6 +1047,26 @@ export function ChannelMonitor() {
                             />
                             {row.config ? t('Edit') : t('Configure')}
                           </Button>
+                          <Tooltip>
+                            <TooltipTrigger
+                              render={
+                                <Button
+                                  type='button'
+                                  variant='outline'
+                                  size='icon-sm'
+                                  className='text-destructive hover:text-destructive'
+                                  disabled={removeConfig.isPending}
+                                  aria-label={t('Remove from monitoring')}
+                                  onClick={() => setPendingDelete(row)}
+                                />
+                              }
+                            >
+                              <Trash2 className='size-3.5' />
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              {t('Remove from monitoring')}
+                            </TooltipContent>
+                          </Tooltip>
                         </div>
                       </TableCell>
                     </TableRow>
@@ -1027,6 +1080,24 @@ export function ChannelMonitor() {
             templates={templates}
             onClose={() => setEditing(null)}
             onSave={handleSave}
+          />
+
+          <ConfirmDialog
+            open={pendingDelete !== null}
+            onOpenChange={(next) => {
+              if (!next) setPendingDelete(null)
+            }}
+            title={t('Remove from monitoring')}
+            desc={t(
+              'Remove channel {{name}} from monitoring? Its detection config and hosting policy state are deleted, and any model the policy banned or downgraded is restored to the channel setting. Probe history is kept.',
+              { name: pendingDelete?.name ?? '' }
+            )}
+            confirmText={t('Delete')}
+            destructive
+            isLoading={removeConfig.isPending}
+            handleConfirm={() => {
+              if (pendingDelete) removeConfig.mutate(pendingDelete.id)
+            }}
           />
 
           <ManualProbeDialog

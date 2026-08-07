@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 package model
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -27,6 +28,12 @@ import (
 	"github.com/QuantumNous/new-api/common"
 
 	"gorm.io/gorm"
+)
+
+const (
+	MonitorBodyModeDefault  = "default"
+	MonitorBodyModeMerge    = "merge"
+	MonitorBodyModeOverride = "override"
 )
 
 // channelStatusRange describes one selectable time window on the channel status
@@ -684,15 +691,18 @@ type ChannelMonitorConfig struct {
 	IntervalSeconds int       `json:"interval_seconds" gorm:"default:60"`
 	JitterSeconds   int       `json:"jitter_seconds" gorm:"default:0"`
 	MonitoredModels JSONValue `json:"monitored_models" gorm:"type:json"`
-	TemplateName    string    `json:"template_name" gorm:"type:varchar(64)"`
-	Headers         JSONValue `json:"headers" gorm:"type:json"`
-	BodyMode        string    `json:"body_mode" gorm:"type:varchar(16);default:'default'"`
-	BodyJson        string    `json:"body_json" gorm:"type:text"`
-	Remark          string    `json:"remark" gorm:"type:varchar(255)"`
-	LastCheckedAt   int64     `json:"last_checked_at" gorm:"bigint;default:0"`
-	NextCheckAt     int64     `json:"next_check_at" gorm:"bigint;default:0;index"`
-	CreatedTime     int64     `json:"created_time" gorm:"bigint"`
-	UpdatedTime     int64     `json:"updated_time" gorm:"bigint"`
+	// TemplateId is the stable reference used by the channel dialog. TemplateName
+	// remains for compatibility with the channel-monitor console and old rows.
+	TemplateId    int       `json:"template_id" gorm:"index"`
+	TemplateName  string    `json:"template_name" gorm:"type:varchar(64)"`
+	Headers       JSONValue `json:"headers" gorm:"type:json"`
+	BodyMode      string    `json:"body_mode" gorm:"type:varchar(16);default:'default'"`
+	BodyJson      string    `json:"body_json" gorm:"type:text"`
+	Remark        string    `json:"remark" gorm:"type:varchar(255)"`
+	LastCheckedAt int64     `json:"last_checked_at" gorm:"bigint;default:0"`
+	NextCheckAt   int64     `json:"next_check_at" gorm:"bigint;default:0;index"`
+	CreatedTime   int64     `json:"created_time" gorm:"bigint"`
+	UpdatedTime   int64     `json:"updated_time" gorm:"bigint"`
 
 	DeletedAt gorm.DeletedAt `json:"-" gorm:"index"`
 }
@@ -733,6 +743,9 @@ type ChannelMonitorHeader struct {
 }
 
 func (c *ChannelMonitorConfig) GetHeaders() []ChannelMonitorHeader {
+	if c == nil {
+		return []ChannelMonitorHeader{}
+	}
 	if len(c.Headers) == 0 {
 		return []ChannelMonitorHeader{}
 	}
@@ -741,6 +754,18 @@ func (c *ChannelMonitorConfig) GetHeaders() []ChannelMonitorHeader {
 		return []ChannelMonitorHeader{}
 	}
 	return headers
+}
+
+func (c *ChannelMonitorConfig) SetHeaders(headers []ChannelMonitorHeader) error {
+	if headers == nil {
+		headers = []ChannelMonitorHeader{}
+	}
+	data, err := common.Marshal(headers)
+	if err != nil {
+		return err
+	}
+	c.Headers = JSONValue(data)
+	return nil
 }
 
 // MonitorTemplate 可复用的探测请求模版。选择模版会把它的 headers/body 快照
@@ -758,6 +783,29 @@ type MonitorTemplate struct {
 	UpdatedTime  int64     `json:"updated_time" gorm:"bigint"`
 
 	DeletedAt gorm.DeletedAt `json:"-" gorm:"index"`
+}
+
+func (t *MonitorTemplate) GetHeaders() []ChannelMonitorHeader {
+	if t == nil || len(t.Headers) == 0 {
+		return []ChannelMonitorHeader{}
+	}
+	var headers []ChannelMonitorHeader
+	if err := common.Unmarshal(t.Headers, &headers); err != nil {
+		return []ChannelMonitorHeader{}
+	}
+	return headers
+}
+
+func (t *MonitorTemplate) SetHeaders(headers []ChannelMonitorHeader) error {
+	if headers == nil {
+		headers = []ChannelMonitorHeader{}
+	}
+	data, err := common.Marshal(headers)
+	if err != nil {
+		return err
+	}
+	t.Headers = JSONValue(data)
+	return nil
 }
 
 // MonitorQuestion is one reusable conversational prompt for scheduled channel
@@ -808,7 +856,8 @@ type ChannelMonitorListItem struct {
 	Priority int64  `json:"priority"`
 }
 
-// GetChannelMonitorListItems 返回全部渠道的精简信息，用于监控列表与渠道列表同步。
+// GetChannelMonitorListItems 返回全部渠道的精简信息。调用方按监控配置过滤，
+// 只展示已配置检测端点/模版的渠道。
 func GetChannelMonitorListItems() ([]*ChannelMonitorListItem, error) {
 	var items []*ChannelMonitorListItem
 	err := DB.Model(&Channel{}).
@@ -868,13 +917,57 @@ func UpsertChannelMonitorConfig(config *ChannelMonitorConfig) error {
 	return DB.Save(config).Error
 }
 
-// ApplyTemplateToChannels 把模版快照重新写入所有引用该模版名的渠道配置，
+// DeleteChannelMonitorConfigByChannel removes a channel from the monitor list and
+// undoes what the managed policy did to it. The list only shows channels that own
+// a config row, so deleting that row is what "remove from monitoring" means.
+// Managed state is cleared and the ability rows are restored to the channel-level
+// enabled/priority in the same transaction: leaving them behind would keep a
+// policy-banned model disabled with no console entry point left to recover it.
+// Probe history is deliberately preserved — the model-status page reads it and
+// DeleteOldChannelMonitorResults already prunes it on retention.
+func DeleteChannelMonitorConfigByChannel(channelId int) error {
+	if channelId <= 0 {
+		return errors.New("invalid channel ID")
+	}
+	// An orphan config whose channel is already gone must still be deletable, so a
+	// missing channel only skips the ability restore (there are no rows to restore).
+	channel, err := GetChannelById(channelId, false)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+
+	return DB.Transaction(func(tx *gorm.DB) error {
+		result := tx.Where("channel_id = ?", channelId).Delete(&ChannelMonitorConfig{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		if channel != nil {
+			if err := tx.Model(&Ability{}).
+				Where("channel_id = ?", channelId).
+				Updates(map[string]interface{}{
+					"enabled":  channel.Status == common.ChannelStatusEnabled,
+					"priority": channel.GetPriority(),
+				}).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Where("channel_id = ?", channelId).Delete(&ChannelManagedState{}).Error
+	})
+}
+
+// ApplyTemplateToChannels 把模版快照重新写入所有引用该模版的渠道配置，
 // 返回受影响的渠道数量。
 func ApplyTemplateToChannels(tpl *MonitorTemplate) (int64, error) {
 	now := common.GetTimestamp()
 	result := DB.Model(&ChannelMonitorConfig{}).
-		Where("template_name = ?", tpl.Name).
+		Where("template_id = ?", tpl.Id).
+		Or("template_name = ?", tpl.Name).
 		Updates(map[string]interface{}{
+			"template_id":   tpl.Id,
+			"template_name": tpl.Name,
 			"endpoint_type": tpl.EndpointType,
 			"stream":        tpl.Stream,
 			"headers":       tpl.Headers,
@@ -965,8 +1058,21 @@ func GetMonitorTemplate(id int) (*MonitorTemplate, error) {
 	return &tpl, nil
 }
 
+func GetMonitorTemplateByName(name string) (*MonitorTemplate, error) {
+	var template MonitorTemplate
+	err := DB.Where("name = ?", strings.TrimSpace(name)).First(&template).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &template, nil
+}
+
 // IsMonitorTemplateNameDuplicated 检查模版名称是否重复（排除自身 ID）。
 func IsMonitorTemplateNameDuplicated(id int, name string) (bool, error) {
+	name = strings.TrimSpace(name)
 	if name == "" {
 		return false, nil
 	}
@@ -991,5 +1097,57 @@ func (t *MonitorTemplate) Update() error {
 
 // DeleteMonitorTemplateByID 按 ID 删除模版。
 func DeleteMonitorTemplateByID(id int) error {
-	return DB.Delete(&MonitorTemplate{}, id).Error
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var template MonitorTemplate
+		if err := tx.First(&template, id).Error; err != nil && err != gorm.ErrRecordNotFound {
+			return err
+		}
+		configs := tx.Model(&ChannelMonitorConfig{}).Where("template_id = ?", id)
+		if template.Name != "" {
+			configs = configs.Or("template_name = ?", template.Name)
+		}
+		if err := configs.
+			Updates(map[string]interface{}{"template_id": 0, "template_name": ""}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&MonitorTemplate{}, id).Error
+	})
+}
+
+// InsertMonitorTemplate and UpdateMonitorTemplate keep the persistence API
+// explicit for controllers and tests while the methods above remain convenient
+// for callers that already own a template value.
+func InsertMonitorTemplate(template *MonitorTemplate) error {
+	if template == nil {
+		return fmt.Errorf("monitor template is nil")
+	}
+	template.Id = 0
+	return template.Insert()
+}
+
+func UpdateMonitorTemplate(template *MonitorTemplate) error {
+	if template == nil {
+		return fmt.Errorf("monitor template is nil")
+	}
+	existing, err := GetMonitorTemplate(template.Id)
+	if err != nil {
+		return err
+	}
+	if existing == nil {
+		return gorm.ErrRecordNotFound
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		template.CreatedTime = existing.CreatedTime
+		template.UpdatedTime = common.GetTimestamp()
+		if err := tx.Model(&ChannelMonitorConfig{}).
+			Where("template_id = ?", template.Id).
+			Or("template_name = ?", existing.Name).
+			Updates(map[string]interface{}{
+				"template_id":   template.Id,
+				"template_name": template.Name,
+			}).Error; err != nil {
+			return err
+		}
+		return tx.Save(template).Error
+	})
 }
