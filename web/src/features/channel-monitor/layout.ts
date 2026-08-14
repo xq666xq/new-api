@@ -17,12 +17,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-export const channelMonitorTableClassName = 'min-w-[1380px] table-fixed'
+export const channelMonitorTableClassName = 'min-w-[1560px] table-fixed'
 
 export const channelMonitorColumns = [
   { key: 'channel', width: 240, className: 'w-[240px]' },
   { key: 'models', width: 300, className: 'w-[300px]' },
   { key: 'monitoring', width: 300, className: 'w-[300px]' },
+  { key: 'hosting', width: 96, className: 'w-[96px]' },
+  { key: 'enabled', width: 84, className: 'w-[84px]' },
   { key: 'remark', width: 140, className: 'w-[140px]' },
   { key: 'strategy', width: 220, className: 'w-[220px]' },
   { key: 'actions', width: 180, className: 'w-[180px]' },

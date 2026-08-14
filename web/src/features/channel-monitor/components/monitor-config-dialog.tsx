@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { ChevronDown, Code2 } from 'lucide-react'
+import { Check, ChevronDown, Code2, Plus } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -93,13 +93,9 @@ function MonitorConfigDialogInner({
   const [config, setConfig] = useState<MonitorConfig>(
     () => row.config ?? newDefaultConfig()
   )
-  const [advancedOpen, setAdvancedOpen] = useState(
-    () =>
-      !!row.config &&
-      (row.config.headers.length > 0 ||
-        row.config.bodyMode !== 'default' ||
-        !!row.config.templateName)
-  )
+  // Advanced holds the rarely-touched fields (template, headers, body, remark),
+  // and starts open so they are reachable without an extra click.
+  const [advancedOpen, setAdvancedOpen] = useState(true)
 
   const streamDisabled = STREAM_INCOMPATIBLE_ENDPOINTS.has(config.endpointType)
   const effectiveStream = streamDisabled ? false : config.stream
@@ -350,15 +346,138 @@ function MonitorConfigDialogInner({
           </div>
         </div>
 
-        <div className='grid gap-2'>
-          <Label htmlFor='monitor-remark'>{t('Remark')}</Label>
-          <Textarea
-            id='monitor-remark'
-            value={config.remark}
-            maxLength={255}
-            className='min-h-20 resize-none'
-            onChange={(event) => patch({ remark: event.target.value })}
-          />
+        {/* Channel-level switches, side by side: "enable" gates the scheduler for
+            this channel at all, "hosting" opts it into the managed policy engine. */}
+        <div className='grid gap-4 md:grid-cols-2'>
+          <div className='rounded-lg border p-3'>
+            <div className='flex items-center justify-between gap-3'>
+              <div className='min-w-0'>
+                <Label
+                  htmlFor='monitor-enabled'
+                  className='text-sm font-medium'
+                >
+                  {t('Enable monitoring')}
+                </Label>
+                <p className='text-muted-foreground mt-0.5 text-xs'>
+                  {t('When off, this channel is skipped by scheduled probes.')}
+                </p>
+              </div>
+              <Switch
+                id='monitor-enabled'
+                checked={config.enabled}
+                onCheckedChange={(v) => patch({ enabled: v })}
+              />
+            </div>
+          </div>
+
+          {/* Behavior is configured globally in the "托管策略" dialog; this switch
+              only opts the channel in. */}
+          <div className='rounded-lg border border-[#0884dd]/25 bg-[#0884dd]/5 p-3'>
+            <div className='flex items-center justify-between gap-3'>
+              <div className='min-w-0'>
+                <Label
+                  htmlFor='monitor-managed'
+                  className='text-sm font-medium'
+                >
+                  {t('Channel hosting')}
+                </Label>
+                <p className='text-muted-foreground mt-0.5 text-xs'>
+                  {t(
+                    'When on, this channel is governed by the hosting policy: probes drive automatic ban/recover and speed-based up/downgrade per model.'
+                  )}
+                </p>
+              </div>
+              <Switch
+                id='monitor-managed'
+                checked={config.managed}
+                onCheckedChange={(v) => patch({ managed: v })}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Monitored models: click a name to include or exclude it. Chips stay
+            compact so a channel with many models still fits without scrolling. */}
+        <div className='space-y-2'>
+          <div className='flex items-center justify-between gap-3'>
+            <Label>
+              {t('Monitored models')}
+              {row.models.length > 0 ? (
+                <span className='text-muted-foreground ml-2 text-xs font-normal tabular-nums'>
+                  {config.monitoredModels.length}/{row.models.length}
+                </span>
+              ) : null}
+            </Label>
+            {row.models.length > 0 ? (
+              <div className='flex items-center gap-2'>
+                <Button
+                  type='button'
+                  variant='ghost'
+                  size='sm'
+                  className='h-7 px-2 text-xs'
+                  onClick={() => patch({ monitoredModels: [...row.models] })}
+                >
+                  {t('Select all')}
+                </Button>
+                <Button
+                  type='button'
+                  variant='ghost'
+                  size='sm'
+                  className='h-7 px-2 text-xs'
+                  onClick={() => patch({ monitoredModels: [] })}
+                >
+                  {t('Select none')}
+                </Button>
+              </div>
+            ) : null}
+          </div>
+          {row.models.length === 0 ? (
+            <p className='text-muted-foreground text-xs'>
+              {t('This channel has no models configured.')}
+            </p>
+          ) : (
+            <div className='max-h-40 overflow-y-auto rounded-lg border p-2'>
+              <div className='flex flex-wrap gap-1.5'>
+                {row.models.map((model) => {
+                  const on = config.monitoredModels.includes(model)
+                  return (
+                    <button
+                      key={model}
+                      type='button'
+                      aria-pressed={on}
+                      title={model}
+                      className={cn(
+                        'focus-visible:ring-ring inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-xs transition-colors focus-visible:ring-2 focus-visible:outline-none',
+                        on
+                          ? 'border-primary bg-primary/10 text-foreground'
+                          : 'text-muted-foreground hover:border-primary/40 hover:text-foreground'
+                      )}
+                      onClick={() =>
+                        setConfig((prev) => ({
+                          ...prev,
+                          monitoredModels: on
+                            ? prev.monitoredModels.filter((m) => m !== model)
+                            : [...prev.monitoredModels, model],
+                        }))
+                      }
+                    >
+                      {on ? (
+                        <Check className='size-3 shrink-0' aria-hidden='true' />
+                      ) : (
+                        <Plus className='size-3 shrink-0' aria-hidden='true' />
+                      )}
+                      <span className='truncate'>{model}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+          <p className='text-muted-foreground text-xs'>
+            {t(
+              'Each enabled model is probed on its own; the channel switch above must also be on.'
+            )}
+          </p>
         </div>
 
         {/* Advanced (optional) */}
@@ -473,6 +592,17 @@ function MonitorConfigDialogInner({
                     />
                   </div>
                 ) : null}
+              </div>
+
+              <div className='grid gap-2'>
+                <Label htmlFor='monitor-remark'>{t('Remark')}</Label>
+                <Textarea
+                  id='monitor-remark'
+                  value={config.remark}
+                  maxLength={255}
+                  className='min-h-20 resize-none'
+                  onChange={(event) => patch({ remark: event.target.value })}
+                />
               </div>
             </div>
           ) : null}

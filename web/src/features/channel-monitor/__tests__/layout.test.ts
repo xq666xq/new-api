@@ -30,17 +30,26 @@ describe('channel monitor table layout', () => {
   test('keeps stable column order and a fixed scrollable table width', () => {
     assert.deepEqual(
       channelMonitorColumns.map((column) => column.key),
-      ['channel', 'models', 'monitoring', 'remark', 'strategy', 'actions']
+      [
+        'channel',
+        'models',
+        'monitoring',
+        'hosting',
+        'enabled',
+        'remark',
+        'strategy',
+        'actions',
+      ]
     )
     assert.equal(
       channelMonitorColumns.reduce((total, column) => total + column.width, 0),
-      1380
+      1560
     )
     assert.match(channelMonitorTableClassName, /table-fixed/)
-    assert.match(channelMonitorTableClassName, /min-w-\[1380px\]/)
+    assert.match(channelMonitorTableClassName, /min-w-\[1560px\]/)
   })
 
-  test('gives monitoring more room than remark', () => {
+  test('gives monitoring more room than hosting and remark', () => {
     const widths = Object.fromEntries(
       channelMonitorColumns.map((column) => [column.key, column.width])
     )
@@ -49,10 +58,13 @@ describe('channel monitor table layout', () => {
       channel: 240,
       models: 300,
       monitoring: 300,
+      hosting: 96,
+      enabled: 84,
       remark: 140,
       strategy: 220,
       actions: 180,
     })
+    assert.ok(widths.monitoring > widths.hosting)
     assert.ok(widths.monitoring > widths.remark)
     assert.ok(widths.models >= widths.monitoring)
   })

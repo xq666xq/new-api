@@ -718,6 +718,18 @@ export function ChannelMonitor() {
   const handleSave = (id: number, config: MonitorConfig) =>
     saveConfig.mutate({ id, config })
 
+  // Row-level shortcuts for the two channel switches, so the common
+  // enable/disable and hosting toggles need no trip through the edit dialog.
+  const toggleEnabled = (row: ChannelMonitorRow, enabled: boolean) => {
+    if (!row.config) return
+    saveConfig.mutate({ id: row.id, config: { ...row.config, enabled } })
+  }
+
+  const toggleManaged = (row: ChannelMonitorRow, managed: boolean) => {
+    if (!row.config) return
+    saveConfig.mutate({ id: row.id, config: { ...row.config, managed } })
+  }
+
   return (
     <SectionPageLayout>
       <SectionPageLayout.Title>
@@ -816,6 +828,10 @@ export function ChannelMonitor() {
                   <TableHead>{t('Channel')}</TableHead>
                   <TableHead>{t('Models')}</TableHead>
                   <TableHead>{t('Monitoring')}</TableHead>
+                  <TableHead className='text-center'>
+                    {t('Channel hosting')}
+                  </TableHead>
+                  <TableHead className='text-center'>{t('Enabled')}</TableHead>
                   <TableHead>{t('Remark')}</TableHead>
                   <TableHead>{t('Strategy')}</TableHead>
                   <TableHead
@@ -829,7 +845,7 @@ export function ChannelMonitor() {
                 {isLoading && (
                   <TableRow>
                     <TableCell
-                      colSpan={6}
+                      colSpan={8}
                       className='text-muted-foreground py-8 text-center text-sm'
                     >
                       {t('Loading...')}
@@ -839,7 +855,7 @@ export function ChannelMonitor() {
                 {!isLoading && rows.length === 0 && (
                   <TableRow>
                     <TableCell
-                      colSpan={6}
+                      colSpan={8}
                       className='text-muted-foreground py-8 text-center text-sm'
                     >
                       {t('No channels have a detection config yet')}
@@ -873,6 +889,28 @@ export function ChannelMonitor() {
                       </TableCell>
                       <TableCell>
                         <StatusPills row={row} />
+                      </TableCell>
+                      <TableCell>
+                        <div className='flex min-w-0 items-center'>
+                          <Switch
+                            checked={row.config?.managed ?? false}
+                            disabled={!row.config || saveConfig.isPending}
+                            aria-label={t('Channel hosting')}
+                            onCheckedChange={(managed) =>
+                              toggleManaged(row, managed)
+                            }
+                          />
+                        </div>
+                      </TableCell>
+                      <TableCell className='text-center'>
+                        <Switch
+                          checked={row.config?.enabled ?? false}
+                          disabled={!row.config || saveConfig.isPending}
+                          aria-label={t('Enable monitoring')}
+                          onCheckedChange={(enabled) =>
+                            toggleEnabled(row, enabled)
+                          }
+                        />
                       </TableCell>
                       <TableCell className='max-w-[140px]'>
                         {row.config?.remark ? (

@@ -5482,6 +5482,7 @@
     "When enabled, violation requests will incur additional charges.": "开启后，违规请求将额外扣费。",
     "When enabled, zero-cost models also pre-consume quota before final settlement.": "启用后，零成本模型也会在最终结算前预先消耗配额。",
     "When no conditions are set, the operation always executes.": "没有条件时，默认总是执行该操作。",
+    "When off, this channel is skipped by scheduled probes.": "关闭后，该渠道不参与定时探测。",
     "When on, this channel is governed by the hosting policy: probes drive automatic ban/recover and speed-based up/downgrade per model.": "开启后，该渠道由托管策略接管：探测结果驱动每个模型的自动封禁/恢复与基于速度的升级/降级。",
     "When performance monitoring is enabled and system resource usage exceeds the set threshold, new Relay requests will be rejected.": "启用性能监控后，当系统资源使用率超过设定阈值时，将拒绝新的 Relay 请求。",
     "When running in containers or ephemeral environments, ensure the SQLite file is mapped to persistent storage to avoid data loss on restart.": "在容器或临时环境中运行时，请确保 SQLite 文件映射到持久存储，以避免重启时数据丢失。",

@@ -5482,6 +5482,7 @@
     "When enabled, violation requests will incur additional charges.": "When enabled, violation requests will incur additional charges.",
     "When enabled, zero-cost models also pre-consume quota before final settlement.": "When enabled, zero-cost models also pre-consume quota before final settlement.",
     "When no conditions are set, the operation always executes.": "When no conditions are set, the operation always executes.",
+    "When off, this channel is skipped by scheduled probes.": "When off, this channel is skipped by scheduled probes.",
     "When on, this channel is governed by the hosting policy: probes drive automatic ban/recover and speed-based up/downgrade per model.": "When on, this channel is governed by the hosting policy: probes drive automatic ban/recover and speed-based up/downgrade per model.",
     "When performance monitoring is enabled and system resource usage exceeds the set threshold, new Relay requests will be rejected.": "When performance monitoring is enabled and system resource usage exceeds the set threshold, new Relay requests will be rejected.",
     "When running in containers or ephemeral environments, ensure the SQLite file is mapped to persistent storage to avoid data loss on restart.": "When running in containers or ephemeral environments, ensure the SQLite file is mapped to persistent storage to avoid data loss on restart.",
