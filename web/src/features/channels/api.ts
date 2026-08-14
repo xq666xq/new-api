@@ -965,6 +965,11 @@ export async function probeChannelStream(
     method: 'POST',
     headers: {
       ...authHeaders,
+      // Declaring SSE is what keeps the transcript live: the /api gzip
+      // middleware skips compression for text/event-stream, and without that
+      // the compressor buffers every flushed event until the request ends, so
+      // the whole console would land at once when the probe finished.
+      Accept: 'text/event-stream',
       'Content-Type': 'application/json',
       'Cache-Control': 'no-store',
     },

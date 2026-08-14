@@ -14,7 +14,16 @@ import (
 func SetApiRouter(router *gin.Engine) {
 	apiRouter := router.Group("/api")
 	apiRouter.Use(middleware.RouteTag("api"))
-	apiRouter.Use(gzip.Gzip(gzip.DefaultCompression))
+	// SSE handlers under /api flush per event, but gin-contrib/gzip's writer has
+	// no Flush of its own: c.Writer.Flush() reaches the socket while the
+	// compressor keeps holding the bytes until the request ends, which turns a
+	// live transcript into one dump at completion. The middleware already skips
+	// requests that declare Accept: text/event-stream; excluding the paths keeps
+	// streaming correct for clients that omit the header.
+	apiRouter.Use(gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPaths([]string{
+		"/api/channel/ollama/pull/stream",
+		"/api/channel_monitor/probe_stream",
+	})))
 	apiRouter.Use(middleware.BodyStorageCleanup()) // 清理请求体存储
 	apiRouter.Use(middleware.GlobalAPIRateLimit())
 	anonymousRequestBodyLimit := middleware.AnonymousRequestBodyLimit()
