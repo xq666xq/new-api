@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { useQueryClient } from '@tanstack/react-query'
 import {
   Braces,
   ChevronDown,
@@ -47,6 +48,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import {
@@ -64,12 +66,50 @@ import {
   updateMonitorTemplate,
 } from '../../api'
 import type {
+  ChannelMonitorMode,
   MonitorBodyMode,
   MonitorHeader,
   MonitorTemplate,
 } from '../../types'
 
 const NO_TEMPLATE = '__none__'
+
+/** Endpoints the probe/test request can target, in the order they are offered. */
+const endpointTypeOptions: Array<{ value: string; label: string }> = [
+  { value: 'auto', label: 'Auto detect (default)' },
+  { value: 'openai', label: 'OpenAI (/v1/chat/completions)' },
+  { value: 'openai-response', label: 'OpenAI Responses (/v1/responses)' },
+  {
+    value: 'openai-response-compact',
+    label: 'OpenAI Response Compaction (/v1/responses/compact)',
+  },
+  { value: 'anthropic', label: 'Anthropic (/v1/messages)' },
+  {
+    value: 'gemini',
+    label: 'Gemini (/v1beta/models/{model}:generateContent)',
+  },
+  { value: 'jina-rerank', label: 'Jina Rerank (/v1/rerank)' },
+  {
+    value: 'image-generation',
+    label: 'Image Generation (/v1/images/generations)',
+  },
+  { value: 'embeddings', label: 'Embeddings (/v1/embeddings)' },
+]
+
+const endpointSelectContentClass = 'w-[460px] max-w-[calc(100vw-2rem)]'
+const endpointSelectItemClass =
+  'items-start py-2 [&_[data-slot=select-item-text]]:min-w-0 [&_[data-slot=select-item-text]]:shrink [&_[data-slot=select-item-text]]:whitespace-normal'
+
+/**
+ * Endpoints with no streaming counterpart. Exported because the test dialog
+ * reuses it when building the manual test request.
+ */
+export const STREAM_INCOMPATIBLE_ENDPOINTS = new Set([
+  'embeddings',
+  'image-generation',
+  'jina-rerank',
+  'openai-response-compact',
+])
 
 const BODY_MODE_OPTIONS: Array<{
   value: MonitorBodyMode
@@ -79,6 +119,11 @@ const BODY_MODE_OPTIONS: Array<{
   { value: 'merge', label: 'Merge' },
   { value: 'override', label: 'Override' },
 ]
+
+const MIN_INTERVAL_SECONDS = 5
+const MAX_INTERVAL_SECONDS = 24 * 60 * 60
+const DEFAULT_INTERVAL_SECONDS = 600
+const DEFAULT_JITTER_SECONDS = 60
 
 let headerId = 0
 
@@ -95,11 +140,22 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback
 }
 
+function parseSeconds(value: string): number {
+  const seconds = Math.floor(Number(value))
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : 0
+}
+
 type DetectionConfigPanelProps = {
   open: boolean
   channelId: number
+  monitoringEnabled: boolean
+  managed: boolean
+  monitoredModels: string[]
   endpointType: string
   stream: boolean
+  onMonitoringEnabledChange: (value: boolean) => void
+  onManagedChange: (value: boolean) => void
+  onMonitoredModelsChange: (value: string[]) => void
   onEndpointTypeChange: (value: string) => void
   onStreamChange: (value: boolean) => void
 }
@@ -182,11 +238,20 @@ function TemplateNameDialog(props: TemplateNameDialogProps) {
 
 export function DetectionConfigPanel(props: DetectionConfigPanelProps) {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
   const channelId = props.channelId
   const panelOpen = props.open
   const applyEndpointType = props.onEndpointTypeChange
   const applyStream = props.onStreamChange
+  const applyMonitoringEnabled = props.onMonitoringEnabledChange
+  const applyManaged = props.onManagedChange
+  const applyMonitoredModels = props.onMonitoredModelsChange
   const [configId, setConfigId] = useState(0)
+  const [monitorMode, setMonitorMode] = useState<ChannelMonitorMode>('default')
+  const [intervalSeconds, setIntervalSeconds] = useState(
+    DEFAULT_INTERVAL_SECONDS
+  )
+  const [jitterSeconds, setJitterSeconds] = useState(DEFAULT_JITTER_SECONDS)
   const [templateId, setTemplateId] = useState(0)
   const [templates, setTemplates] = useState<MonitorTemplate[]>([])
   const [headers, setHeaders] = useState<MonitorHeader[]>([])
@@ -205,6 +270,16 @@ export function DetectionConfigPanel(props: DetectionConfigPanelProps) {
     () => templates.find((template) => template.id === templateId) ?? null,
     [templateId, templates]
   )
+
+  const endpointSelectItems = useMemo(
+    () =>
+      endpointTypeOptions.map((option) => ({
+        value: option.value,
+        label: t(option.label),
+      })),
+    [t]
+  )
+  const streamDisabled = STREAM_INCOMPATIBLE_ENDPOINTS.has(props.endpointType)
 
   const clearTemplateSelection = useCallback(() => {
     setTemplateId(0)
@@ -228,6 +303,12 @@ export function DetectionConfigPanel(props: DetectionConfigPanelProps) {
         if (!active) return
         setTemplates(loadedTemplates)
         setConfigId(config?.id ?? 0)
+        applyMonitoringEnabled(config?.enabled ?? false)
+        applyManaged(config?.managed ?? false)
+        applyMonitoredModels(config?.monitoredModels ?? [])
+        setMonitorMode(config?.monitorMode ?? 'default')
+        setIntervalSeconds(config?.intervalSeconds ?? DEFAULT_INTERVAL_SECONDS)
+        setJitterSeconds(config?.jitterSeconds ?? DEFAULT_JITTER_SECONDS)
         setTemplateId(config?.templateId ?? 0)
         setHeaders(cloneHeaders(config?.headers ?? []))
         setBodyMode(config?.bodyMode ?? 'default')
@@ -254,7 +335,16 @@ export function DetectionConfigPanel(props: DetectionConfigPanelProps) {
     return () => {
       active = false
     }
-  }, [applyEndpointType, applyStream, channelId, panelOpen, t])
+  }, [
+    applyEndpointType,
+    applyManaged,
+    applyMonitoredModels,
+    applyMonitoringEnabled,
+    applyStream,
+    channelId,
+    panelOpen,
+    t,
+  ])
 
   const applyTemplate = useCallback(
     (value: string | null) => {
@@ -299,11 +389,25 @@ export function DetectionConfigPanel(props: DetectionConfigPanelProps) {
         return
       }
     }
+    const nextIntervalSeconds = Math.min(
+      MAX_INTERVAL_SECONDS,
+      Math.max(MIN_INTERVAL_SECONDS, intervalSeconds)
+    )
+    const nextJitterSeconds = Math.max(
+      0,
+      Math.min(jitterSeconds, nextIntervalSeconds - 1)
+    )
     setSaving(true)
     try {
       const saved = await saveChannelMonitorConfig({
         id: configId,
         channelId: props.channelId,
+        enabled: props.monitoringEnabled,
+        managed: props.managed,
+        monitorMode,
+        intervalSeconds: nextIntervalSeconds,
+        jitterSeconds: nextJitterSeconds,
+        monitoredModels: props.monitoredModels,
         endpointType: props.endpointType,
         stream: props.stream,
         templateId,
@@ -314,20 +418,39 @@ export function DetectionConfigPanel(props: DetectionConfigPanelProps) {
       })
       setConfigId(saved.id)
       setHeaders(cloneHeaders(saved.headers))
-      toast.success(t('Detection config saved'))
+      applyMonitoringEnabled(saved.enabled)
+      applyManaged(saved.managed)
+      applyMonitoredModels(saved.monitoredModels)
+      setMonitorMode(saved.monitorMode)
+      setIntervalSeconds(saved.intervalSeconds)
+      setJitterSeconds(saved.jitterSeconds)
+      void queryClient.invalidateQueries({
+        queryKey: ['channel-monitor', 'list'],
+      })
+      toast.success(t('Monitoring config saved'))
     } catch (error: unknown) {
       toast.error(errorMessage(error, t('Failed to save detection config')))
     } finally {
       setSaving(false)
     }
   }, [
+    applyManaged,
+    applyMonitoredModels,
+    applyMonitoringEnabled,
     bodyJson,
     bodyMode,
     configId,
     headers,
+    intervalSeconds,
+    jitterSeconds,
+    monitorMode,
     props.channelId,
     props.endpointType,
+    props.managed,
+    props.monitoredModels,
+    props.monitoringEnabled,
     props.stream,
+    queryClient,
     t,
     templateId,
   ])
@@ -501,6 +624,171 @@ export function DetectionConfigPanel(props: DetectionConfigPanelProps) {
               </TooltipTrigger>
               <TooltipContent>{t('Delete detection template')}</TooltipContent>
             </Tooltip>
+          </div>
+        </div>
+
+        <div className='grid gap-4 md:grid-cols-2'>
+          <div className='grid gap-2'>
+            <Label htmlFor='endpoint-type'>{t('Endpoint Type')}</Label>
+            <Select
+              items={endpointSelectItems}
+              value={props.endpointType}
+              onValueChange={(value) => {
+                if (value === null) return
+                applyEndpointType(value)
+              }}
+            >
+              <SelectTrigger id='endpoint-type' className='w-full min-w-0'>
+                <SelectValue
+                  className='min-w-0 truncate'
+                  placeholder={t('Auto detect (default)')}
+                />
+              </SelectTrigger>
+              <SelectContent
+                alignItemWithTrigger={false}
+                className={endpointSelectContentClass}
+              >
+                <SelectGroup>
+                  {endpointSelectItems.map((option) => (
+                    <SelectItem
+                      key={option.value}
+                      value={option.value}
+                      className={endpointSelectItemClass}
+                    >
+                      <span className='min-w-0 leading-snug break-words whitespace-normal'>
+                        {option.label}
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <p className='text-muted-foreground text-xs'>
+              {t(
+                'Override the endpoint used for testing. Leave empty to auto detect.'
+              )}
+            </p>
+          </div>
+          <div className='grid gap-2'>
+            <Label htmlFor='stream-toggle'>{t('Stream Mode')}</Label>
+            <div className='flex items-center gap-2'>
+              <Switch
+                id='stream-toggle'
+                checked={props.stream}
+                onCheckedChange={applyStream}
+                disabled={streamDisabled}
+              />
+              <span className='text-sm'>
+                {props.stream ? t('Enabled') : t('Disabled')}
+              </span>
+            </div>
+            <p className='text-muted-foreground text-xs'>
+              {t('Enable streaming mode for the test request.')}
+            </p>
+          </div>
+        </div>
+
+        <div className='grid gap-3 sm:grid-cols-2'>
+          <div className='flex min-h-14 items-center justify-between gap-3 rounded-md border px-3 py-2'>
+            <Label htmlFor='channel-monitoring-enabled'>
+              {t('Enable monitoring')}
+            </Label>
+            <Switch
+              id='channel-monitoring-enabled'
+              checked={props.monitoringEnabled}
+              disabled={loading || saving}
+              onCheckedChange={props.onMonitoringEnabledChange}
+            />
+          </div>
+          <div className='flex min-h-14 items-center justify-between gap-3 rounded-md border px-3 py-2'>
+            <Label htmlFor='channel-managed'>{t('Channel hosting')}</Label>
+            <Switch
+              id='channel-managed'
+              checked={props.managed}
+              disabled={loading || saving}
+              onCheckedChange={props.onManagedChange}
+            />
+          </div>
+        </div>
+
+        <div className='grid gap-2'>
+          <Label id='channel-monitor-mode-label'>{t('Monitoring mode')}</Label>
+          <ToggleGroup
+            value={[monitorMode]}
+            onValueChange={(values) => {
+              const value = values[0]
+              if (value === 'default' || value === 'banned_only') {
+                setMonitorMode(value)
+              }
+            }}
+            variant='outline'
+            className='grid w-full grid-cols-2'
+            aria-labelledby='channel-monitor-mode-label'
+            disabled={loading || saving}
+          >
+            <ToggleGroupItem value='default'>
+              {t('Default probing')}
+            </ToggleGroupItem>
+            <ToggleGroupItem value='banned_only'>
+              {t('Banned-only probing')}
+            </ToggleGroupItem>
+          </ToggleGroup>
+          <p className='text-muted-foreground text-xs'>
+            {monitorMode === 'banned_only'
+              ? t(
+                  'Only probes banned models and pending ban confirmations, so healthy models are left alone.'
+                )
+              : t('Probes every monitored model on each interval.')}
+          </p>
+        </div>
+
+        <div className='grid gap-3 sm:grid-cols-2'>
+          <div className='grid gap-2'>
+            <Label htmlFor='channel-monitor-interval'>
+              {t('Probe interval (seconds)')}
+            </Label>
+            <Input
+              id='channel-monitor-interval'
+              type='number'
+              min={MIN_INTERVAL_SECONDS}
+              max={MAX_INTERVAL_SECONDS}
+              step={1}
+              value={intervalSeconds}
+              disabled={loading || saving}
+              onChange={(event) =>
+                setIntervalSeconds(parseSeconds(event.target.value))
+              }
+              onBlur={() => {
+                const interval = Math.min(
+                  MAX_INTERVAL_SECONDS,
+                  Math.max(MIN_INTERVAL_SECONDS, intervalSeconds)
+                )
+                setIntervalSeconds(interval)
+                setJitterSeconds((current) => Math.min(current, interval - 1))
+              }}
+            />
+          </div>
+          <div className='grid gap-2'>
+            <Label htmlFor='channel-monitor-jitter'>
+              {t('Random jitter (seconds)')}
+            </Label>
+            <Input
+              id='channel-monitor-jitter'
+              type='number'
+              min={0}
+              max={Math.max(0, intervalSeconds - 1)}
+              step={1}
+              value={jitterSeconds}
+              disabled={loading || saving}
+              onChange={(event) =>
+                setJitterSeconds(parseSeconds(event.target.value))
+              }
+              onBlur={() =>
+                setJitterSeconds((current) =>
+                  Math.max(0, Math.min(current, intervalSeconds - 1))
+                )
+              }
+            />
           </div>
         </div>
 

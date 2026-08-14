@@ -30,26 +30,17 @@ describe('channel monitor table layout', () => {
   test('keeps stable column order and a fixed scrollable table width', () => {
     assert.deepEqual(
       channelMonitorColumns.map((column) => column.key),
-      [
-        'channel',
-        'models',
-        'monitoring',
-        'hosting',
-        'enabled',
-        'remark',
-        'strategy',
-        'actions',
-      ]
+      ['channel', 'models', 'monitoring', 'remark', 'strategy', 'actions']
     )
     assert.equal(
       channelMonitorColumns.reduce((total, column) => total + column.width, 0),
-      1560
+      1380
     )
     assert.match(channelMonitorTableClassName, /table-fixed/)
-    assert.match(channelMonitorTableClassName, /min-w-\[1560px\]/)
+    assert.match(channelMonitorTableClassName, /min-w-\[1380px\]/)
   })
 
-  test('gives monitoring more room than hosting and remark', () => {
+  test('gives monitoring more room than remark', () => {
     const widths = Object.fromEntries(
       channelMonitorColumns.map((column) => [column.key, column.width])
     )
@@ -58,13 +49,10 @@ describe('channel monitor table layout', () => {
       channel: 240,
       models: 300,
       monitoring: 300,
-      hosting: 96,
-      enabled: 84,
       remark: 140,
       strategy: 220,
       actions: 180,
     })
-    assert.ok(widths.monitoring > widths.hosting)
     assert.ok(widths.monitoring > widths.remark)
     assert.ok(widths.models >= widths.monitoring)
   })
@@ -80,7 +68,10 @@ describe('channel monitor table layout', () => {
     ]) {
       assert.match(className, /\bsticky\b/)
       assert.match(className, /\bright-0\b/)
-      assert.match(className, /shadow-\[-8px_0_10px_-10px_hsl\(var\(--foreground\)\)\]/)
+      assert.match(
+        className,
+        /shadow-\[-8px_0_10px_-10px_hsl\(var\(--foreground\)\)\]/
+      )
     }
     // The header must stack above pinned cells so a scrolled row cannot cover it.
     assert.match(pinnedActionsHeadClassName, /\bz-30\b/)

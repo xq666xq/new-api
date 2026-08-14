@@ -38,11 +38,10 @@ type ManagedPolicySetting struct {
 	DingTalkSecret     string `json:"dingtalk_secret"`
 
 	// Error-triggered probe. When enabled, a genuine upstream fault seen on a
-	// managed channel that monitors the erroring model no longer disables the
-	// whole channel; it only advances that channel's next monitor probe, deferring
-	// the ban/recover decision to the managed policy. This is independent of the
-	// global auto-disable switch and the channel's AutoBan flag — advancing a probe
-	// is not a ban, so it works even when auto-disable is globally off. A probe is
+	// managed channel configured to probe the erroring model no longer disables
+	// the whole channel; it queues a one-shot probe and defers the ban/recover
+	// decision to the managed policy. This is independent of the monitoring
+	// switches, the global auto-disable switch, and the channel's AutoBan flag. A probe is
 	// triggered only after ErrorProbeThreshold *consecutive* faults for the same
 	// (channel, model) within ErrorProbeWindowSeconds; a single successful forward
 	// for that pair, or the window elapsing, resets the counter. Non-managed

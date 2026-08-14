@@ -283,6 +283,11 @@ func TestIsChannelManagedDoesNotDependOnProbeEnabled(t *testing.T) {
 	managed, err = IsChannelManaged(12)
 	require.NoError(t, err)
 	assert.False(t, managed)
+
+	configs, err := GetManagedChannelMonitorConfigs()
+	require.NoError(t, err)
+	require.Len(t, configs, 1)
+	assert.Equal(t, 11, configs[0].ChannelId, "managed policy must include hosted channels while periodic probes are paused")
 }
 
 func TestManagedOverlayMatchesExactModelOnly(t *testing.T) {

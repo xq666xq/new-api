@@ -38,13 +38,13 @@ func newChannelMonitorTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-func TestChannelStatusRowsUseEnabledMonitorResultsPerModel(t *testing.T) {
+func TestChannelStatusRowsUseMonitoredModelsRegardlessChannelSwitch(t *testing.T) {
 	db := newChannelMonitorTestDB(t)
 
 	channel := Channel{Name: "monitored", Type: 1, Key: "test-key", Models: "model-a,model-b", Group: "default"}
 	require.NoError(t, db.Create(&channel).Error)
 	config := ChannelMonitorConfig{ChannelId: channel.Id, Enabled: true, IntervalSeconds: 600}
-	require.NoError(t, config.SetMonitoredModels([]string{"model-a", "model-b"}))
+	require.NoError(t, config.SetMonitoredModels([]string{"model-a"}))
 	require.NoError(t, db.Create(&config).Error)
 
 	disabledChannel := Channel{Name: "disabled", Type: 1, Key: "test-key", Models: "model-c", Group: "default"}
@@ -53,12 +53,16 @@ func TestChannelStatusRowsUseEnabledMonitorResultsPerModel(t *testing.T) {
 	require.NoError(t, disabledConfig.SetMonitoredModels([]string{"model-c"}))
 	require.NoError(t, db.Create(&disabledConfig).Error)
 
+	unconfiguredChannel := Channel{Name: "not-monitored", Type: 1, Key: "test-key", Models: "model-d", Group: "default"}
+	require.NoError(t, db.Create(&unconfiguredChannel).Error)
+
 	now := time.Unix(1_800_000_180, 0)
 	require.NoError(t, db.Create(&[]ChannelMonitorResult{
 		{ChannelId: channel.Id, ModelName: "model-a", QuestionId: 7, QuestionContent: "Explain HTTP 404 briefly.", Success: true, LatencyMs: 120, CheckedAt: now.Unix() - 60},
 		{ChannelId: channel.Id, ModelName: "model-a", Success: false, LatencyMs: 280, CheckedAt: now.Unix() - 30},
 		{ChannelId: channel.Id, ModelName: "model-b", Success: true, LatencyMs: 90, CheckedAt: now.Unix() - 20},
 		{ChannelId: disabledChannel.Id, ModelName: "model-c", Success: true, LatencyMs: 50, CheckedAt: now.Unix() - 10},
+		{ChannelId: unconfiguredChannel.Id, ModelName: "model-d", Success: true, LatencyMs: 40, CheckedAt: now.Unix() - 5},
 	}).Error)
 
 	rows, err := GetChannelStatusRows("6h", now)
@@ -70,7 +74,8 @@ func TestChannelStatusRowsUseEnabledMonitorResultsPerModel(t *testing.T) {
 	assert.Equal(t, 50.0, rows[0].SuccessRate)
 	assert.Equal(t, 200, rows[0].AvgResponseMs)
 	assert.Equal(t, "degraded", rows[0].Health)
-	assert.Equal(t, "model-b", rows[1].Model)
+	assert.Equal(t, disabledChannel.Id, rows[1].ChannelId)
+	assert.Equal(t, "model-c", rows[1].Model)
 	assert.Equal(t, 1, rows[1].Requests)
 	assert.Equal(t, 100.0, rows[1].SuccessRate)
 	assert.Equal(t, "healthy", rows[1].Health)
@@ -204,6 +209,44 @@ func TestGetDueChannelMonitorConfigsUsesNextCheckAt(t *testing.T) {
 	assert.False(t, HasDueChannelMonitorConfigs(now))
 }
 
+func TestManagedErrorProbePendingIgnoresPeriodicMonitoringSwitch(t *testing.T) {
+	db := newChannelMonitorTestDB(t)
+	now := int64(1_800_000_000)
+
+	managed := ChannelMonitorConfig{
+		ChannelId:   11,
+		Enabled:     false,
+		Managed:     true,
+		NextCheckAt: now + 3600,
+	}
+	require.NoError(t, db.Create(&managed).Error)
+	unmanaged := ChannelMonitorConfig{ChannelId: 12, Enabled: false, Managed: false}
+	require.NoError(t, db.Create(&unmanaged).Error)
+
+	affected, err := AdvanceManagedErrorProbeDue(managed.ChannelId)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), affected)
+	assert.True(t, HasPendingManagedErrorProbeConfigs())
+
+	pending, err := GetPendingManagedErrorProbeConfigs()
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	assert.Equal(t, managed.ChannelId, pending[0].ChannelId)
+	assert.False(t, pending[0].Enabled)
+
+	// The regular scheduler still ignores the disabled config. Completing the
+	// one-shot sweep clears the pending sentinel without starting a cadence.
+	due, err := GetDueChannelMonitorConfigs(now)
+	require.NoError(t, err)
+	assert.Empty(t, due)
+	require.NoError(t, UpdateChannelMonitorSchedule(managed.ChannelId, now, now+60))
+	assert.False(t, HasPendingManagedErrorProbeConfigs())
+
+	affected, err = AdvanceManagedErrorProbeDue(unmanaged.ChannelId)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), affected)
+}
+
 // TestChannelMonitorNextProbeAt verifies the scheduling contract: the next probe
 // time is always strictly in the future and stays within [interval-jitter,
 // interval+jitter], including when interval/jitter are out of range and must be
@@ -330,7 +373,7 @@ func TestGetChannelStatusRowsMergesForwardingTraffic(t *testing.T) {
 		{ChannelId: channel.Id, ModelName: "model-a", Type: LogTypeConsume, UseTime: 5, CreatedAt: now.Unix() - 35},
 		{ChannelId: channel.Id, ModelName: "model-a", Type: LogTypeConsume, UseTime: 5, CreatedAt: now.Unix() - 25},
 		{ChannelId: channel.Id, ModelName: "model-a", Type: LogTypeError, UseTime: 5, CreatedAt: now.Unix() - 20},
-		// Unmonitored model on the same channel: must be ignored.
+		// Model monitoring is off, so this model must not appear on the status page.
 		{ChannelId: channel.Id, ModelName: "model-b", Type: LogTypeConsume, UseTime: 5, CreatedAt: now.Unix() - 20},
 		// Non-consume/error type: must be ignored even for a monitored model.
 		{ChannelId: channel.Id, ModelName: "model-a", Type: LogTypeManage, UseTime: 5, CreatedAt: now.Unix() - 15},

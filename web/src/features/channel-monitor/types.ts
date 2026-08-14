@@ -20,6 +20,9 @@ For commercial licensing, please contact support@quantumnous.com
 /** How the request body is combined with the endpoint's default probe body. */
 export type BodyMode = 'default' | 'merge' | 'override'
 
+/** Which monitored models receive scheduled probes. */
+export type MonitorMode = 'default' | 'banned_only'
+
 /** A single custom request header entry in the config form. */
 export interface HeaderEntry {
   /** Client-side identity used to keep editable rows stable. */
@@ -37,6 +40,8 @@ export interface HeaderEntry {
 export interface MonitorConfig {
   /** Master switch: whether monitoring actually runs for this channel. */
   enabled: boolean
+  /** Default probes all selected models; banned-only probes recovery candidates. */
+  monitorMode: MonitorMode
   /** Endpoint used to probe, e.g. "auto", "openai", "anthropic". */
   endpointType: string
   /** Whether the probe request is streamed. Defaults ON for new configs. */

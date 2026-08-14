@@ -277,8 +277,8 @@ func BuildRecommendationList() ([]RecommendedModel, error) {
 // monitoring-enabled channel actually probes, keyed by channel id. Only these
 // pairs are eligible for recommendation, since only they have a probe speed —
 // recommending an unmonitored model would advertise a model with no measured
-// speed. Mirrors the source used by the channel-status page (Enabled = true, plus
-// the channel's monitored model list).
+// speed. Unlike the status page, recommendations intentionally remain limited
+// to actively probed model pairs.
 func getMonitoredChannelModelPairs() (map[int]map[string]struct{}, error) {
 	var configs []ChannelMonitorConfig
 	if err := DB.Where("enabled = ?", true).Find(&configs).Error; err != nil {

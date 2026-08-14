@@ -29,6 +29,7 @@ function makeConfig(
 ): MonitorConfig {
   return {
     enabled,
+    monitorMode: 'default',
     endpointType: 'openai',
     stream: true,
     intervalSeconds: 60,

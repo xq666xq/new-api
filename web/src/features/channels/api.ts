@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { getGroups as getUserGroups } from '@/features/users/api'
-import { api, type ApiRequestConfig } from '@/lib/api'
+import { api, getFreshAuthHeaders, type ApiRequestConfig } from '@/lib/api'
 
 import type {
   AddChannelRequest,
@@ -40,6 +40,9 @@ import type {
   MonitorBodyMode,
   MonitorHeader,
   MonitorTemplate,
+  ProbeStreamChunk,
+  ProbeStreamHandlers,
+  ProbeStreamStart,
   SearchChannelsParams,
   SearchChannelsResponse,
   TagOperationParams,
@@ -64,6 +67,12 @@ type RawMonitorRequestSettings = {
 type RawChannelMonitorConfig = RawMonitorRequestSettings & {
   id?: number
   channel_id?: number
+  enabled?: boolean
+  managed?: boolean
+  monitor_mode?: string
+  interval_seconds?: number
+  jitter_seconds?: number
+  monitored_models?: string[]
   template_id?: number
   updated_time?: number
 }
@@ -281,7 +290,12 @@ export async function batchSetChannelTag(
  */
 export async function testChannel(
   id: number,
-  params?: { model?: string; endpoint_type?: string; stream?: boolean }
+  params?: {
+    model?: string
+    endpoint_type?: string
+    stream?: boolean
+    use_monitor_config?: boolean
+  }
 ): Promise<ChannelTestResponse> {
   const res = await api.get(
     `/api/channel/test/${id}`,
@@ -721,6 +735,12 @@ function normalizeMonitorBodyMode(value?: string): MonitorBodyMode {
   return 'default'
 }
 
+function normalizeChannelMonitorMode(
+  value?: string
+): ChannelMonitorConfig['monitorMode'] {
+  return value === 'banned_only' ? value : 'default'
+}
+
 function toMonitorHeaders(headers?: RawMonitorHeader[]): MonitorHeader[] {
   return (headers ?? []).map((header, index) => ({
     id: `${index}-${header.key}`,
@@ -739,6 +759,12 @@ function toChannelMonitorConfig(
   return {
     id: raw.id ?? 0,
     channelId: raw.channel_id ?? 0,
+    enabled: raw.enabled ?? false,
+    managed: raw.managed ?? false,
+    monitorMode: normalizeChannelMonitorMode(raw.monitor_mode),
+    intervalSeconds: raw.interval_seconds || 600,
+    jitterSeconds: raw.jitter_seconds ?? 60,
+    monitoredModels: raw.monitored_models ?? [],
     endpointType: raw.endpoint_type || 'auto',
     stream: raw.stream ?? false,
     templateId: raw.template_id ?? 0,
@@ -755,6 +781,12 @@ function monitorConfigToWire(
   return {
     id: config.id,
     channel_id: config.channelId,
+    enabled: config.enabled,
+    managed: config.managed,
+    monitor_mode: config.monitorMode,
+    interval_seconds: config.intervalSeconds,
+    jitter_seconds: config.jitterSeconds,
+    monitored_models: config.monitoredModels,
     endpoint_type: config.endpointType,
     stream: config.stream,
     template_id: config.templateId,
@@ -861,27 +893,13 @@ export async function deleteMonitorTemplate(id: number): Promise<void> {
   if (!res.data.success) throw new Error(res.data.message || 'Request failed')
 }
 
-export async function probeChannelNow(
-  channelId: number,
-  modelName: string
-): Promise<ChannelMonitorProbeResult> {
-  const res = await api.post<
-    ApiWireResponse<
-      RawChannelMonitorProbeResult | RawChannelMonitorProbeResult[]
-    >
-  >(
-    '/api/channel_monitor/probe',
-    { channel_id: channelId, model_name: modelName },
-    channelActionConfig({ headers: { 'Cache-Control': 'no-store' } })
-  )
-  const payload = res.data.data
-  const raw = Array.isArray(payload) ? payload[0] : payload
-  if (!res.data.success || !raw) {
-    throw new Error(res.data.message || 'Request failed')
-  }
+function toChannelMonitorProbeResult(
+  raw: RawChannelMonitorProbeResult,
+  fallbackModelName: string
+): ChannelMonitorProbeResult {
   const trace = raw.trace ?? {}
   return {
-    modelName: raw.model_name ?? modelName,
+    modelName: raw.model_name ?? fallbackModelName,
     endpointType: raw.endpoint_type || 'auto',
     stream: raw.stream ?? false,
     questionId: raw.question_id ?? 0,
@@ -907,5 +925,128 @@ export async function probeChannelNow(
       responseBodyTruncated: trace.response_body_truncated ?? false,
       bodyLimitBytes: trace.body_limit_bytes ?? 0,
     },
+  }
+}
+
+export async function probeChannelNow(
+  channelId: number,
+  modelName: string
+): Promise<ChannelMonitorProbeResult> {
+  const res = await api.post<
+    ApiWireResponse<
+      RawChannelMonitorProbeResult | RawChannelMonitorProbeResult[]
+    >
+  >(
+    '/api/channel_monitor/probe',
+    { channel_id: channelId, model_name: modelName },
+    channelActionConfig({ headers: { 'Cache-Control': 'no-store' } })
+  )
+  const payload = res.data.data
+  const raw = Array.isArray(payload) ? payload[0] : payload
+  if (!res.data.success || !raw) {
+    throw new Error(res.data.message || 'Request failed')
+  }
+  return toChannelMonitorProbeResult(raw, modelName)
+}
+
+/**
+ * Probe a channel and stream progress as Server-Sent Events so the console can
+ * print upstream output while the request is still in flight. The probe itself
+ * is identical to probeChannelNow; only the delivery differs.
+ */
+export async function probeChannelStream(
+  channelId: number,
+  modelName: string,
+  handlers: ProbeStreamHandlers,
+  signal?: AbortSignal
+): Promise<void> {
+  const authHeaders = await getFreshAuthHeaders()
+  const response = await fetch('/api/channel_monitor/probe_stream', {
+    method: 'POST',
+    headers: {
+      ...authHeaders,
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+    },
+    body: JSON.stringify({ channel_id: channelId, model_name: modelName }),
+    signal,
+  })
+
+  if (!response.ok || !response.body) {
+    // A pre-stream failure is still a normal JSON error envelope.
+    let message = `HTTP ${response.status}`
+    try {
+      const parsed = JSON.parse(await response.text())
+      if (parsed?.message) message = parsed.message
+    } catch {
+      // Keep the status-code message.
+    }
+    throw new Error(message)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let eventName = ''
+  let eventData = ''
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      // The trailing fragment may be a partial line; keep it for the next read.
+      buffer = lines.pop() ?? ''
+
+      for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          eventName = line.slice(7).trim()
+          continue
+        }
+        if (line.startsWith('data: ')) {
+          eventData = line.slice(6)
+          continue
+        }
+        if (line !== '' || !eventName) continue
+
+        if (eventName === 'end') return
+        try {
+          const parsed = JSON.parse(eventData)
+          if (eventName === 'start') {
+            handlers.onStart?.({
+              modelName: parsed.model_name ?? modelName,
+              endpointType: parsed.endpoint_type || 'auto',
+              stream: parsed.stream ?? false,
+              questionId: parsed.question_id ?? 0,
+              questionContent: parsed.question_content ?? '',
+              channelName: parsed.channel_name ?? '',
+              channelType: parsed.channel_type ?? 0,
+            } satisfies ProbeStreamStart)
+          } else if (eventName === 'chunk') {
+            handlers.onChunk?.({
+              modelName: parsed.model_name ?? modelName,
+              delta: parsed.delta ?? '',
+            } satisfies ProbeStreamChunk)
+          } else if (eventName === 'result') {
+            handlers.onResult?.(
+              toChannelMonitorProbeResult(
+                parsed as RawChannelMonitorProbeResult,
+                modelName
+              )
+            )
+          } else if (eventName === 'error') {
+            handlers.onError?.(parsed.message || 'Request failed')
+          }
+        } catch {
+          // A malformed frame must not tear down an in-flight probe.
+        }
+        eventName = ''
+        eventData = ''
+      }
+    }
+  } finally {
+    reader.releaseLock()
   }
 }

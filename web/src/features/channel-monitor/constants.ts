@@ -57,10 +57,11 @@ export function channelsUsingTemplate(
 export function newDefaultConfig(): MonitorConfig {
   return {
     enabled: true,
+    monitorMode: 'default',
     endpointType: 'auto',
     stream: true,
-    intervalSeconds: 60,
-    jitterSeconds: 0,
+    intervalSeconds: 600,
+    jitterSeconds: 60,
     monitoredModels: [],
     templateName: '',
     headers: [],

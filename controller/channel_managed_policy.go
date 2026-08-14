@@ -49,9 +49,6 @@ import (
 // in ChannelManagedState so it survives ability-table rebuilds (see
 // ReplayManagedAbilities). Only channels with Managed=true participate.
 func runChannelManagedPolicy() {
-	if !operation_setting.IsChannelMonitorEnabled() {
-		return
-	}
 	setting := operation_setting.GetManagedPolicySetting()
 	if !setting.BanEnabled && !setting.SpeedEnabled {
 		return
@@ -92,6 +89,27 @@ type managedModelPair struct {
 	channelID int
 	channelNm string
 	model     string
+}
+
+// isSingleModelChannel reports whether the channel logically exposes exactly
+// one model. Empty entries and duplicates do not turn a single-model channel
+// into a multi-model channel.
+func isSingleModelChannel(channel *model.Channel) bool {
+	if channel == nil {
+		return false
+	}
+	models := make(map[string]struct{})
+	for _, modelName := range channel.GetModels() {
+		modelName = strings.TrimSpace(modelName)
+		if modelName == "" {
+			continue
+		}
+		models[modelName] = struct{}{}
+		if len(models) > 1 {
+			return false
+		}
+	}
+	return len(models) == 1
 }
 
 // managedFlipEvent records one ban/recover flip so the ban stage can defer
@@ -187,18 +205,17 @@ func applyBanForPair(pair managedModelPair, setting *operation_setting.ManagedPo
 		}
 	}
 
-	// The stable state is "active" only when both the channel is enabled and the
-	// per-model policy is not banned. A channel-level disable (manual status 2 or
-	// legacy automatic status 3) therefore makes the pair behave as banned for the
-	// confirmation state machine, so sustained successful probes drive a recovery
-	// that also re-enables the channel. For a channel that is already enabled this
-	// is a no-op and the per-model ban/recover logic is unchanged.
+	// A single-model managed channel mirrors its only model's ban state at the
+	// channel level. Multi-model channels stay model-scoped: their channel status
+	// does not influence this pair's confirmation state and is never changed by a
+	// model flip.
 	channel, channelErr := model.GetChannelById(pair.channelID, false)
 	if channelErr != nil || channel == nil {
 		common.SysError(fmt.Sprintf("managed policy: channel lookup failed channel=%d model=%s: %v", pair.channelID, pair.model, channelErr))
 		return nil
 	}
 	channelDisabled := channel.Status != common.ChannelStatusEnabled
+	singleModelChannel := isSingleModelChannel(channel)
 
 	// Idempotency + confirmation spacing. The engine runs once per ~15s sweep but
 	// a pair may not have a fresh probe every sweep, so guard against counting the
@@ -215,7 +232,10 @@ func applyBanForPair(pair managedModelPair, setting *operation_setting.ManagedPo
 	// Probe "agrees" with the stable state when a success matches active or a
 	// failure matches banned. Agreement resets the confirmation counter; only
 	// sustained disagreement drives a flip.
-	stableIsActive := !channelDisabled && state.BanState != model.ManagedBanStateBanned
+	stableIsActive := state.BanState != model.ManagedBanStateBanned
+	if singleModelChannel {
+		stableIsActive = !channelDisabled && stableIsActive
+	}
 	agrees := latest.Success == stableIsActive
 	if agrees {
 		if state.ConfirmCount != 0 {
@@ -264,6 +284,11 @@ func applyBanForPair(pair managedModelPair, setting *operation_setting.ManagedPo
 			common.SysError(fmt.Sprintf("managed policy: disable ability failed channel=%d model=%s: %v", pair.channelID, pair.model, err))
 			return nil
 		}
+		if singleModelChannel {
+			if !model.UpdateChannelStatus(pair.channelID, "", common.ChannelStatusAutoDisabled, "managed policy banned the channel's only model") {
+				common.SysError(fmt.Sprintf("managed policy: disable single-model channel failed channel=%d model=%s", pair.channelID, pair.model))
+			}
+		}
 		return &managedFlipEvent{pair: pair, action: "banned", reason: "连续探测失败达到确认次数", state: state, latest: latest}
 	}
 
@@ -276,15 +301,12 @@ func applyBanForPair(pair managedModelPair, setting *operation_setting.ManagedPo
 		common.SysError(fmt.Sprintf("managed policy: enable ability failed channel=%d model=%s: %v", pair.channelID, pair.model, err))
 		return nil
 	}
-	// When the flip was driven by a channel-level disable, the per-model ability
-	// alone is not enough: the memory-cache selection path routes on the
-	// channel's own status, so the channel must be re-enabled to serve traffic
-	// again. UpdateChannelStatus flips every ability on this channel back to
-	// enabled, so replay the managed states afterwards to keep this channel's
-	// other models that the policy still bans disabled.
-	if channelDisabled {
-		model.UpdateChannelStatus(pair.channelID, "", common.ChannelStatusEnabled, "")
-		if err := model.ReplayManagedAbilities(nil, pair.channelID); err != nil {
+	// Only a single-model channel mirrors recovery at channel level. Multi-model
+	// channels retain their existing channel status regardless of this model flip.
+	if singleModelChannel && channelDisabled {
+		if !model.UpdateChannelStatus(pair.channelID, "", common.ChannelStatusEnabled, "") {
+			common.SysError(fmt.Sprintf("managed policy: recover single-model channel failed channel=%d model=%s", pair.channelID, pair.model))
+		} else if err := model.ReplayManagedAbilities(nil, pair.channelID); err != nil {
 			common.SysError(fmt.Sprintf("managed policy: replay abilities after channel recover failed channel=%d: %v", pair.channelID, err))
 		}
 	}

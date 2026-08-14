@@ -1280,12 +1280,33 @@ func TestChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	// The monitoring configuration dialog asks for the saved detection config so a
+	// manual test assembles the same request as a scheduled probe: template
+	// headers, template body mode, and a question from the shared bank. Channels
+	// with nothing saved keep the plain built-in test request.
+	var monitorConfig *model.ChannelMonitorConfig
+	var monitorQuestion string
+	if useMonitorConfig, _ := strconv.ParseBool(c.Query("use_monitor_config")); useMonitorConfig {
+		monitorConfig, err = model.GetChannelMonitorConfig(channelId)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		if monitorConfig != nil {
+			questions, questionErr := model.GetAllMonitorQuestions()
+			if questionErr != nil {
+				common.ApiError(c, questionErr)
+				return
+			}
+			_, monitorQuestion = selectMonitorQuestion(questions)
+		}
+	}
 	tik := time.Now()
 	requestCtx := context.Background()
 	if c.Request != nil {
 		requestCtx = c.Request.Context()
 	}
-	result := testChannel(requestCtx, channel, testUserID, testModel, endpointType, isStream)
+	result := testChannelWithMonitorConfig(requestCtx, channel, testUserID, testModel, endpointType, isStream, monitorConfig, monitorQuestion)
 	if result.localErr != nil {
 		resp := gin.H{
 			"success": false,

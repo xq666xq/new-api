@@ -208,6 +208,74 @@ type manualChannelMonitorProbeRequest struct {
 	ModelName string `json:"model_name"`
 }
 
+// manualProbePlan holds everything a manual probe needs after validation. Both
+// the buffered (ProbeChannelMonitorNow) and streaming
+// (ProbeChannelMonitorStream) endpoints resolve it the same way so the two
+// entry points can never drift on which channel/model/question is probed.
+type manualProbePlan struct {
+	channel    *model.Channel
+	config     *model.ChannelMonitorConfig
+	models     []string
+	questions  []*model.MonitorQuestion
+	testUserID int
+}
+
+// resolveManualProbePlan validates the request and loads the channel, monitor
+// config, question pool and test user. It writes the API error itself and
+// returns nil when the probe must not run, so callers can simply return.
+func resolveManualProbePlan(c *gin.Context, request manualChannelMonitorProbeRequest) *manualProbePlan {
+	if request.ChannelId <= 0 {
+		common.ApiErrorMsg(c, "缺少有效的渠道 ID")
+		return nil
+	}
+
+	config, err := model.GetChannelMonitorConfig(request.ChannelId)
+	if err != nil {
+		common.ApiError(c, err)
+		return nil
+	}
+	if config == nil {
+		common.ApiErrorMsg(c, "该渠道尚未配置监控")
+		return nil
+	}
+	channel, err := model.GetChannelById(request.ChannelId, true)
+	if err != nil {
+		common.ApiError(c, err)
+		return nil
+	}
+	if channel == nil {
+		common.ApiErrorMsg(c, "渠道不存在")
+		return nil
+	}
+	models, modelAllowed := manualProbeModels(request.ModelName, channel.GetModels())
+	if !modelAllowed {
+		common.ApiErrorMsg(c, "所选模型已不属于该渠道")
+		return nil
+	}
+	if len(models) == 0 {
+		common.ApiErrorMsg(c, "该渠道没有可检测的模型")
+		return nil
+	}
+	questions, err := model.GetAllMonitorQuestions()
+	if err != nil {
+		common.ApiError(c, err)
+		return nil
+	}
+	testUserID, err := resolveChannelTestUserID(c)
+	if err != nil {
+		common.ApiError(c, err)
+		return nil
+	}
+
+	return &manualProbePlan{
+		channel:    channel,
+		config:     config,
+		models:     models,
+		questions:  questions,
+		testUserID: testUserID,
+	}
+}
+
 type manualChannelMonitorProbeResult struct {
 	RecordId        int64                                 `json:"record_id"`
 	ModelName       string                                `json:"model_name"`
@@ -222,6 +290,34 @@ type manualChannelMonitorProbeResult struct {
 	ErrorMessage    string                                `json:"error_message"`
 	CheckedAt       int64                                 `json:"checked_at"`
 	Trace           relaycommon.MonitorProbeTraceSnapshot `json:"trace"`
+}
+
+// buildManualProbeResult assembles the administrator-facing probe payload from a
+// saved record plus the in-memory trace snapshot.
+func buildManualProbeResult(
+	record *model.ChannelMonitorResult,
+	config *model.ChannelMonitorConfig,
+	snapshot relaycommon.MonitorProbeTraceSnapshot,
+) manualChannelMonitorProbeResult {
+	statusCode := snapshot.ResponseStatusCode
+	if statusCode == 0 {
+		statusCode = record.StatusCode
+	}
+	return manualChannelMonitorProbeResult{
+		RecordId:        record.Id,
+		ModelName:       record.ModelName,
+		EndpointType:    config.EndpointType,
+		Stream:          config.Stream || config.Managed,
+		QuestionId:      record.QuestionId,
+		QuestionContent: record.QuestionContent,
+		Success:         record.Success,
+		LatencyMs:       record.LatencyMs,
+		TtftMs:          record.TtftMs,
+		StatusCode:      statusCode,
+		ErrorMessage:    record.ErrorMessage,
+		CheckedAt:       record.CheckedAt,
+		Trace:           snapshot,
+	}
 }
 
 // manualProbeModels resolves the exact channel model requested by the admin.
@@ -269,67 +365,26 @@ func ProbeChannelMonitorNow(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if request.ChannelId <= 0 {
-		common.ApiErrorMsg(c, "缺少有效的渠道 ID")
+
+	plan := resolveManualProbePlan(c, request)
+	if plan == nil {
 		return
 	}
 
-	config, err := model.GetChannelMonitorConfig(request.ChannelId)
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	if config == nil {
-		common.ApiErrorMsg(c, "该渠道尚未配置监控")
-		return
-	}
-	channel, err := model.GetChannelById(request.ChannelId, true)
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	if channel == nil {
-		common.ApiErrorMsg(c, "渠道不存在")
-		return
-	}
-	models, modelAllowed := manualProbeModels(
-		request.ModelName,
-		channel.GetModels(),
-	)
-	if !modelAllowed {
-		common.ApiErrorMsg(c, "所选模型已不属于该渠道")
-		return
-	}
-	if len(models) == 0 {
-		common.ApiErrorMsg(c, "该渠道没有可检测的模型")
-		return
-	}
-
-	questions, err := model.GetAllMonitorQuestions()
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	testUserID, err := resolveChannelTestUserID(c)
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-
-	results := make([]manualChannelMonitorProbeResult, 0, len(models))
-	for _, modelName := range models {
+	results := make([]manualChannelMonitorProbeResult, 0, len(plan.models))
+	for _, modelName := range plan.models {
 		if err := c.Request.Context().Err(); err != nil {
 			common.ApiError(c, err)
 			return
 		}
-		questionID, questionContent := selectMonitorQuestion(questions)
+		questionID, questionContent := selectMonitorQuestion(plan.questions)
 		trace := &relaycommon.MonitorProbeTrace{}
 		record, err := executeChannelMonitorProbe(
 			c.Request.Context(),
-			channel,
+			plan.channel,
 			nil,
-			config,
-			testUserID,
+			plan.config,
+			plan.testUserID,
 			modelName,
 			questionID,
 			questionContent,
@@ -340,29 +395,125 @@ func ProbeChannelMonitorNow(c *gin.Context) {
 			common.ApiError(c, err)
 			return
 		}
-		snapshot := trace.Snapshot()
-		statusCode := snapshot.ResponseStatusCode
-		if statusCode == 0 {
-			statusCode = record.StatusCode
-		}
-		results = append(results, manualChannelMonitorProbeResult{
-			RecordId:        record.Id,
-			ModelName:       record.ModelName,
-			EndpointType:    config.EndpointType,
-			Stream:          config.Stream || config.Managed,
-			QuestionId:      record.QuestionId,
-			QuestionContent: record.QuestionContent,
-			Success:         record.Success,
-			LatencyMs:       record.LatencyMs,
-			TtftMs:          record.TtftMs,
-			StatusCode:      statusCode,
-			ErrorMessage:    record.ErrorMessage,
-			CheckedAt:       record.CheckedAt,
-			Trace:           snapshot,
-		})
+		results = append(results, buildManualProbeResult(record, plan.config, trace.Snapshot()))
 	}
 
 	common.ApiSuccess(c, results)
+}
+
+// probeStreamEvent is one server-sent event emitted while a manual probe runs.
+type probeStreamEvent struct {
+	name string
+	data any
+}
+
+// ProbeChannelMonitorStream runs the same manual probe as ProbeChannelMonitorNow
+// but streams progress to the administrator as Server-Sent Events so the console
+// can print upstream output while the request is still in flight. The probe
+// itself, the saved record and the trace snapshot are identical; only the
+// delivery differs. Event names: start, chunk, result, error, end.
+func ProbeChannelMonitorStream(c *gin.Context) {
+	var request manualChannelMonitorProbeRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	// Validate before switching to SSE so failures are still ordinary JSON errors.
+	plan := resolveManualProbePlan(c, request)
+	if plan == nil {
+		return
+	}
+
+	c.Header("Content-Type", "text/event-stream; charset=utf-8")
+	c.Header("Cache-Control", "no-store")
+	c.Header("Pragma", "no-cache")
+	c.Header("Connection", "keep-alive")
+	// Reverse proxies buffer by default, which would defeat the whole point.
+	c.Header("X-Accel-Buffering", "no")
+
+	ctx := c.Request.Context()
+	// The relay stream handler may read the upstream body on its own goroutine,
+	// so trace chunks are funnelled through a channel and only ever written to
+	// the gin ResponseWriter by this handler's goroutine.
+	events := make(chan probeStreamEvent, 512)
+
+	go func() {
+		defer close(events)
+		emit := func(name string, data any) bool {
+			select {
+			case events <- probeStreamEvent{name: name, data: data}:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+		for _, modelName := range plan.models {
+			if ctx.Err() != nil {
+				return
+			}
+			questionID, questionContent := selectMonitorQuestion(plan.questions)
+			stream := plan.config.Stream || plan.config.Managed
+			if !emit("start", map[string]any{
+				"model_name":       modelName,
+				"endpoint_type":    plan.config.EndpointType,
+				"stream":           stream,
+				"question_id":      questionID,
+				"question_content": questionContent,
+				"channel_name":     plan.channel.Name,
+				"channel_type":     plan.channel.Type,
+			}) {
+				return
+			}
+
+			trace := &relaycommon.MonitorProbeTrace{}
+			trace.SetOnResponseWrite(func(chunk []byte) {
+				emit("chunk", map[string]any{
+					"model_name": modelName,
+					"delta":      string(chunk),
+				})
+			})
+
+			record, err := executeChannelMonitorProbe(
+				ctx,
+				plan.channel,
+				nil,
+				plan.config,
+				plan.testUserID,
+				modelName,
+				questionID,
+				questionContent,
+				model.ChannelMonitorTriggerManual,
+				trace,
+			)
+			// Stop feeding the channel before the snapshot so no late chunk can
+			// arrive after this model's result event.
+			trace.SetOnResponseWrite(nil)
+			if err != nil {
+				emit("error", map[string]any{
+					"model_name": modelName,
+					"message":    common.MaskSensitiveInfo(err.Error()),
+				})
+				return
+			}
+			if !emit("result", buildManualProbeResult(record, plan.config, trace.Snapshot())) {
+				return
+			}
+		}
+		emit("end", map[string]any{})
+	}()
+
+	for event := range events {
+		payload, err := common.Marshal(event.data)
+		if err != nil {
+			common.SysError("channel monitor probe stream marshal failed: " + err.Error())
+			continue
+		}
+		if _, err := fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", event.name, payload); err != nil {
+			return
+		}
+		c.Writer.Flush()
+	}
 }
 
 type triggerChannelMonitorRequest struct {
@@ -595,6 +746,31 @@ func normalizeMonitorConfig(cfg *model.ChannelMonitorConfig) error {
 	if err := resolveMonitorConfigTemplate(cfg); err != nil {
 		return err
 	}
+	if err := normalizeMonitorScheduleSettings(cfg); err != nil {
+		return err
+	}
+	cfg.Remark = strings.TrimSpace(cfg.Remark)
+	if len([]rune(cfg.Remark)) > 255 {
+		return errors.New("备注不能超过 255 个字符")
+	}
+	return nil
+}
+
+func normalizeMonitorScheduleSettings(cfg *model.ChannelMonitorConfig) error {
+	cfg.MonitorMode = strings.TrimSpace(cfg.MonitorMode)
+	if cfg.MonitorMode == "" {
+		cfg.MonitorMode = model.ChannelMonitorModeDefault
+	}
+	if cfg.MonitorMode != model.ChannelMonitorModeDefault &&
+		cfg.MonitorMode != model.ChannelMonitorModeBannedOnly {
+		return fmt.Errorf("unsupported monitor mode: %s", cfg.MonitorMode)
+	}
+	if cfg.IntervalSeconds == 0 {
+		cfg.IntervalSeconds = model.ChannelMonitorDefaultIntervalSeconds
+		if cfg.JitterSeconds == 0 {
+			cfg.JitterSeconds = model.ChannelMonitorDefaultJitterSeconds
+		}
+	}
 	if cfg.IntervalSeconds < model.MonitorMinIntervalSeconds {
 		cfg.IntervalSeconds = model.MonitorMinIntervalSeconds
 	}
@@ -607,10 +783,6 @@ func normalizeMonitorConfig(cfg *model.ChannelMonitorConfig) error {
 	}
 	if cfg.JitterSeconds > cfg.IntervalSeconds-1 {
 		cfg.JitterSeconds = cfg.IntervalSeconds - 1
-	}
-	cfg.Remark = strings.TrimSpace(cfg.Remark)
-	if len([]rune(cfg.Remark)) > 255 {
-		return errors.New("备注不能超过 255 个字符")
 	}
 	return nil
 }
@@ -669,14 +841,20 @@ func SaveChannelMonitorConfig(c *gin.Context) {
 }
 
 type channelDetectionConfigRequest struct {
-	Id           int             `json:"id"`
-	ChannelId    int             `json:"channel_id"`
-	EndpointType string          `json:"endpoint_type"`
-	Stream       bool            `json:"stream"`
-	TemplateId   int             `json:"template_id"`
-	Headers      model.JSONValue `json:"headers"`
-	BodyMode     string          `json:"body_mode"`
-	BodyJson     string          `json:"body_json"`
+	Id              int             `json:"id"`
+	ChannelId       int             `json:"channel_id"`
+	Enabled         *bool           `json:"enabled"`
+	Managed         *bool           `json:"managed"`
+	MonitorMode     *string         `json:"monitor_mode"`
+	IntervalSeconds *int            `json:"interval_seconds"`
+	JitterSeconds   *int            `json:"jitter_seconds"`
+	MonitoredModels *[]string       `json:"monitored_models"`
+	EndpointType    string          `json:"endpoint_type"`
+	Stream          bool            `json:"stream"`
+	TemplateId      int             `json:"template_id"`
+	Headers         model.JSONValue `json:"headers"`
+	BodyMode        string          `json:"body_mode"`
+	BodyJson        string          `json:"body_json"`
 }
 
 // DeleteChannelMonitorConfig removes one channel from the monitor list. Because
@@ -702,9 +880,9 @@ func DeleteChannelMonitorConfig(c *gin.Context) {
 	common.ApiSuccess(c, nil)
 }
 
-// SaveChannelDetectionConfig updates only the request snapshot used by the
-// channel dialog. Existing scheduler, model-selection and managed-policy fields
-// are deliberately preserved.
+// SaveChannelDetectionConfig updates the request snapshot and any monitoring
+// controls explicitly sent by the channel dialog. Older clients omit those
+// optional controls, preserving existing scheduler and managed-policy fields.
 func SaveChannelDetectionConfig(c *gin.Context) {
 	var request channelDetectionConfigRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
@@ -729,7 +907,31 @@ func SaveChannelDetectionConfig(c *gin.Context) {
 	if config == nil {
 		config = &model.ChannelMonitorConfig{
 			ChannelId:       request.ChannelId,
-			IntervalSeconds: 60,
+			MonitorMode:     model.ChannelMonitorModeDefault,
+			IntervalSeconds: model.ChannelMonitorDefaultIntervalSeconds,
+			JitterSeconds:   model.ChannelMonitorDefaultJitterSeconds,
+		}
+	}
+	if request.Enabled != nil {
+		config.Enabled = *request.Enabled
+	}
+	if request.Managed != nil {
+		config.Managed = *request.Managed
+	}
+	if request.MonitorMode != nil {
+		config.MonitorMode = *request.MonitorMode
+	}
+	if request.IntervalSeconds != nil {
+		config.IntervalSeconds = *request.IntervalSeconds
+	}
+	if request.JitterSeconds != nil {
+		config.JitterSeconds = *request.JitterSeconds
+	}
+	if request.MonitoredModels != nil {
+		monitoredModels := intersectModels(*request.MonitoredModels, channel.GetModels())
+		if err := config.SetMonitoredModels(monitoredModels); err != nil {
+			common.ApiError(c, err)
+			return
 		}
 	}
 	config.EndpointType = request.EndpointType
@@ -751,6 +953,10 @@ func SaveChannelDetectionConfig(c *gin.Context) {
 		return
 	}
 	if err := resolveMonitorConfigTemplate(config); err != nil {
+		common.ApiErrorMsg(c, err.Error())
+		return
+	}
+	if err := normalizeMonitorScheduleSettings(config); err != nil {
 		common.ApiErrorMsg(c, err.Error())
 		return
 	}

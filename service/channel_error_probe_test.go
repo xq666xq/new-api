@@ -4,7 +4,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/QuantumNous/new-api/model"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestBumpChannelModelErrorProbe pins the "stable errors only" contract of the
@@ -72,4 +74,15 @@ func TestBumpChannelModelErrorProbe(t *testing.T) {
 		ResetChannelModelErrorProbe(channelID, modelName)
 		assert.True(t, bumpChannelModelErrorProbeAt(channelID, modelName, 1, window, base))
 	})
+}
+
+func TestManagedErrorProbeCoversModelIgnoresPeriodicMonitoringSwitch(t *testing.T) {
+	config := &model.ChannelMonitorConfig{Enabled: false, Managed: true}
+	require.NoError(t, config.SetMonitoredModels([]string{"gpt-managed"}))
+
+	assert.True(t, managedErrorProbeCoversModel(config, "gpt-managed"))
+	assert.False(t, managedErrorProbeCoversModel(config, "gpt-other"))
+
+	config.Managed = false
+	assert.False(t, managedErrorProbeCoversModel(config, "gpt-managed"))
 }

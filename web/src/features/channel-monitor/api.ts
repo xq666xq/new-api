@@ -25,7 +25,6 @@ import type {
   ChannelMonitorSetting,
   ChannelRecommendationRow,
   HeaderEntry,
-  ManualMonitorProbeResult,
   ManagedModelState,
   ManagedPolicySetting,
   MonitorConfig,
@@ -51,6 +50,7 @@ type RawConfig = {
   id: number
   channel_id: number
   enabled: boolean
+  monitor_mode: string
   endpoint_type: string
   stream: boolean
   interval_seconds: number
@@ -104,40 +104,12 @@ type RawQuestion = {
   updated_time: number
 }
 
-type RawProbeTrace = {
-  request_method: string
-  request_url: string
-  request_headers: Record<string, string[]> | null
-  request_body: string
-  request_body_truncated: boolean
-  request_write_error: string
-  response_url: string
-  response_status_code: number
-  response_status: string
-  response_headers: Record<string, string[]> | null
-  response_body: string
-  response_body_truncated: boolean
-  body_limit_bytes: number
-}
-
-type RawManualProbeResult = {
-  record_id: number
-  model_name: string
-  endpoint_type: string
-  stream: boolean
-  question_id: number
-  question_content: string
-  success: boolean
-  latency_ms: number
-  ttft_ms: number
-  status_code: number
-  error_message: string
-  checked_at: number
-  trace: RawProbeTrace
-}
-
 function asBodyMode(value: string): BodyMode {
   return value === 'merge' || value === 'override' ? value : 'default'
+}
+
+function asMonitorMode(value: string): MonitorConfig['monitorMode'] {
+  return value === 'banned_only' ? value : 'default'
 }
 
 function toHeaderEntries(raw: RawHeader[] | null): HeaderEntry[] {
@@ -153,10 +125,11 @@ function toMonitorConfig(raw: RawConfig | null): MonitorConfig | null {
   if (!raw) return null
   return {
     enabled: raw.enabled,
+    monitorMode: asMonitorMode(raw.monitor_mode),
     endpointType: raw.endpoint_type || 'auto',
     stream: raw.stream,
-    intervalSeconds: raw.interval_seconds || 60,
-    jitterSeconds: raw.jitter_seconds ?? 0,
+    intervalSeconds: raw.interval_seconds || 600,
+    jitterSeconds: raw.jitter_seconds ?? 60,
     monitoredModels: raw.monitored_models ?? [],
     templateName: raw.template_name ?? '',
     headers: toHeaderEntries(raw.headers),
@@ -214,44 +187,11 @@ function toMonitorQuestion(raw: RawQuestion): MonitorQuestion {
   }
 }
 
-function toManualProbeResult(
-  raw: RawManualProbeResult
-): ManualMonitorProbeResult {
-  return {
-    recordId: raw.record_id,
-    modelName: raw.model_name,
-    endpointType: raw.endpoint_type,
-    stream: raw.stream,
-    questionId: raw.question_id,
-    questionContent: raw.question_content,
-    success: raw.success,
-    latencyMs: raw.latency_ms,
-    ttftMs: raw.ttft_ms,
-    statusCode: raw.status_code,
-    errorMessage: raw.error_message ?? '',
-    checkedAt: raw.checked_at,
-    trace: {
-      requestMethod: raw.trace.request_method ?? '',
-      requestUrl: raw.trace.request_url ?? '',
-      requestHeaders: raw.trace.request_headers ?? {},
-      requestBody: raw.trace.request_body ?? '',
-      requestBodyTruncated: raw.trace.request_body_truncated,
-      requestWriteError: raw.trace.request_write_error ?? '',
-      responseUrl: raw.trace.response_url ?? '',
-      responseStatusCode: raw.trace.response_status_code ?? 0,
-      responseStatus: raw.trace.response_status ?? '',
-      responseHeaders: raw.trace.response_headers ?? {},
-      responseBody: raw.trace.response_body ?? '',
-      responseBodyTruncated: raw.trace.response_body_truncated,
-      bodyLimitBytes: raw.trace.body_limit_bytes ?? 0,
-    },
-  }
-}
-
 function configToWire(channelId: number, config: MonitorConfig) {
   return {
     channel_id: channelId,
     enabled: config.enabled,
+    monitor_mode: config.monitorMode,
     endpoint_type: config.endpointType,
     stream: config.stream,
     interval_seconds: config.intervalSeconds,
@@ -387,21 +327,6 @@ export async function triggerChannelMonitorNow(
   if (!res.data?.success) {
     throw new Error(res.data?.message || 'trigger monitor failed')
   }
-}
-
-/** Run one channel model with the configured probe strategy and return its trace. */
-export async function runChannelMonitorProbe(
-  channelId: number,
-  modelName: string
-): Promise<ManualMonitorProbeResult[]> {
-  const res = await api.post<ApiResponse<RawManualProbeResult[]>>(
-    '/api/channel_monitor/probe',
-    { channel_id: channelId, model_name: modelName }
-  )
-  if (!res.data?.success || !res.data.data) {
-    throw new Error(res.data?.message || 'manual monitor probe failed')
-  }
-  return res.data.data.map(toManualProbeResult)
 }
 
 /** Fetch all reusable probe templates. */

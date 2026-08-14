@@ -203,13 +203,13 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
                   e.stopPropagation()
                   handleTest()
                 }}
-                aria-label={t('Test Channel Connection')}
+                aria-label={t('Monitoring configuration')}
               />
             }
           >
             <PlugZap className='size-4' />
           </TooltipTrigger>
-          <TooltipContent>{t('Test Channel Connection')}</TooltipContent>
+          <TooltipContent>{t('Monitoring configuration')}</TooltipContent>
         </Tooltip>
       )}
 
@@ -259,9 +259,9 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
             </DropdownMenuItem>
           )}
 
-          {/* Test Connection */}
+          {/* Monitoring configuration */}
           <DropdownMenuItem onClick={handleTest}>
-            {t('Test Connection')}
+            {t('Monitoring configuration')}
             <DropdownMenuShortcut>
               <PlugZap size={16} />
             </DropdownMenuShortcut>

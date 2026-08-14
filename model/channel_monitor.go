@@ -34,6 +34,12 @@ const (
 	MonitorBodyModeDefault  = "default"
 	MonitorBodyModeMerge    = "merge"
 	MonitorBodyModeOverride = "override"
+
+	ChannelMonitorModeDefault    = "default"
+	ChannelMonitorModeBannedOnly = "banned_only"
+
+	ChannelMonitorDefaultIntervalSeconds = 600
+	ChannelMonitorDefaultJitterSeconds   = 60
 )
 
 // channelStatusRange describes one selectable time window on the channel status
@@ -301,9 +307,12 @@ func channelStatusHealth(total, success int) string {
 	return "degraded"
 }
 
-// GetChannelStatusRows builds the sparkline for every enabled channel +
-// monitored-model pair over the given time range (see channelStatusRanges for
-// valid keys; unknown keys fall back to "1h"). Each bucket merges two sources:
+// GetChannelStatusRows builds the sparkline for every monitored model on
+// channels that have a monitor config. The channel monitoring switch controls
+// probe execution, not status-page visibility; the per-model monitoring
+// selection still determines which model cards are shown. Over the given time
+// range (see channelStatusRanges for valid keys; unknown keys fall back to
+// "1h"), each bucket merges two sources:
 // active probe results (ChannelMonitorResult) and real forwarding traffic
 // (LogTypeConsume = success, LogTypeError = failure) aggregated in the log DB.
 // Both feed totals/success/health; only probe results feed AvgResponseMs, since
@@ -315,7 +324,7 @@ func GetChannelStatusRows(rangeKey string, now time.Time) ([]ChannelStatusRow, e
 	bucketSeconds := window.BucketSeconds
 	bucketCount := window.BucketCount
 	var configs []ChannelMonitorConfig
-	if err := DB.Where("enabled = ?", true).Find(&configs).Error; err != nil {
+	if err := DB.Find(&configs).Error; err != nil {
 		return nil, err
 	}
 	if len(configs) == 0 {
@@ -352,8 +361,11 @@ func GetChannelStatusRows(rangeKey string, now time.Time) ([]ChannelStatusRow, e
 			continue
 		}
 		available := make(map[string]struct{})
-		for _, model := range strings.Split(channel.Models, ",") {
-			available[strings.TrimSpace(model)] = struct{}{}
+		for _, modelName := range strings.Split(channel.Models, ",") {
+			modelName = strings.TrimSpace(modelName)
+			if modelName != "" {
+				available[modelName] = struct{}{}
+			}
 		}
 		seen := make(map[string]struct{})
 		for _, modelName := range config.GetMonitoredModels() {
@@ -606,6 +618,42 @@ func GetDueChannelMonitorConfigs(now int64) ([]*ChannelMonitorConfig, error) {
 	return configs, nil
 }
 
+const managedErrorProbePendingAt int64 = -1
+
+// HasPendingManagedErrorProbeConfigs reports whether an error-triggered probe
+// is waiting. These one-shot probes are driven by hosting rather than periodic
+// monitoring, so neither the global nor per-channel monitoring switch gates
+// them.
+func HasPendingManagedErrorProbeConfigs() bool {
+	if DB == nil {
+		return false
+	}
+	var count int64
+	err := DB.Model(&ChannelMonitorConfig{}).
+		Where("managed = ? AND next_check_at = ?", true, managedErrorProbePendingAt).
+		Limit(1).Count(&count).Error
+	return err == nil && count > 0
+}
+
+// GetPendingManagedErrorProbeConfigs returns one-shot probes requested by the
+// managed error policy. A completed sweep replaces the sentinel with the next
+// regular check time; disabled configs then remain idle until another error
+// streak requests a probe.
+func GetPendingManagedErrorProbeConfigs() ([]*ChannelMonitorConfig, error) {
+	var configs []*ChannelMonitorConfig
+	if err := DB.Where("managed = ? AND next_check_at = ?", true, managedErrorProbePendingAt).Find(&configs).Error; err != nil {
+		return nil, err
+	}
+	return configs, nil
+}
+
+// HasPendingManagedErrorProbe reports whether this config was explicitly
+// queued by the managed error policy. The one-shot probe remains a full policy
+// check even when the periodic mode only probes banned models.
+func (c *ChannelMonitorConfig) HasPendingManagedErrorProbe() bool {
+	return c != nil && c.NextCheckAt == managedErrorProbePendingAt
+}
+
 func InsertChannelMonitorResult(result *ChannelMonitorResult) error {
 	if result.CheckedAt == 0 {
 		result.CheckedAt = common.GetTimestamp()
@@ -662,6 +710,20 @@ func AdvanceChannelMonitorConfigDue(channelId int) (int64, error) {
 	return result.RowsAffected, result.Error
 }
 
+// AdvanceManagedErrorProbeDue queues one managed-policy probe independently of
+// periodic monitoring. The negative sentinel distinguishes this one-shot work
+// from a normal due time, so a disabled config does not start probing on a
+// cadence after the requested sweep completes.
+func AdvanceManagedErrorProbeDue(channelId int) (int64, error) {
+	result := DB.Model(&ChannelMonitorConfig{}).
+		Where("channel_id = ? AND managed = ?", channelId, true).
+		Updates(map[string]interface{}{
+			"next_check_at": managedErrorProbePendingAt,
+			"updated_time":  common.GetTimestamp(),
+		})
+	return result.RowsAffected, result.Error
+}
+
 const (
 	// MonitorMinIntervalSeconds 是探测间隔下限。因为系统任务调度器的最小节拍是
 	// 15s（见 controller/system_task_handlers.go 的 channelMonitorHandler.Interval），
@@ -676,8 +738,9 @@ const (
 // ±JitterSeconds 的随机抖动）对每个 MonitoredModels 项独立探测。Headers 使用
 // JSON 数组保存 {key,value} 列表。Enabled 是渠道级总开关；MonitoredModels 记录
 // 被勾选监控的模型名列表，某个模型“正在监控”当且仅当 Enabled 为真且该模型在此
-// 列表中。NextCheckAt 是下一次到期的绝对时间戳（秒），每次探测完由 NextProbeAt
-// 重新计算并持久化；为 0 表示“从未调度、立即到期”。
+// 列表中。NextCheckAt 是下一次到期的绝对时间戳（秒），每次周期探测完由
+// NextProbeAt 重新计算并持久化；为 0 表示“从未调度、立即到期”，为 -1 表示托管
+// 策略排队的一次性错误探测。
 type ChannelMonitorConfig struct {
 	Id        int  `json:"id"`
 	ChannelId int  `json:"channel_id" gorm:"uniqueIndex:uk_channel_monitor_channel,where:deleted_at IS NULL;not null"`
@@ -686,9 +749,10 @@ type ChannelMonitorConfig struct {
 	// engine bans/recovers and up/downgrades its monitored models based purely on
 	// probe results (see ChannelManagedModelState and channel_managed_policy).
 	Managed         bool      `json:"managed"`
+	MonitorMode     string    `json:"monitor_mode" gorm:"type:varchar(16);default:'default'"`
 	EndpointType    string    `json:"endpoint_type" gorm:"type:varchar(64);default:'auto'"`
 	Stream          bool      `json:"stream"`
-	IntervalSeconds int       `json:"interval_seconds" gorm:"default:60"`
+	IntervalSeconds int       `json:"interval_seconds" gorm:"default:600"`
 	JitterSeconds   int       `json:"jitter_seconds" gorm:"default:0"`
 	MonitoredModels JSONValue `json:"monitored_models" gorm:"type:json"`
 	// TemplateId is the stable reference used by the channel dialog. TemplateName

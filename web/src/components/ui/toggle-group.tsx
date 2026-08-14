@@ -93,6 +93,13 @@ function ToggleGroupItem({
           variant: context.variant || variant,
           size: context.size || size,
         }),
+        // A group is a single choice among siblings, so the selected item is
+        // filled instead of inheriting the standalone toggle's `bg-muted`:
+        // `--muted` resolves to the same color as `--popover` in the dark theme,
+        // which makes a selection inside a dialog invisible. The `aria-pressed`
+        // hover rules also outrank the base `hover:*` ones, so the fill survives
+        // while the pointer is on the selected item.
+        'aria-pressed:bg-primary aria-pressed:text-primary-foreground aria-pressed:hover:bg-primary aria-pressed:hover:text-primary-foreground',
         className
       )}
       {...props}

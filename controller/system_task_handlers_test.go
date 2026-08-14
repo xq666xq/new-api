@@ -164,3 +164,22 @@ func TestExecuteChannelMonitorProbeBatchSkipsQueuedJobsAfterFailure(t *testing.T
 		assert.Nil(t, result)
 	}
 }
+
+func TestChannelMonitorModelsForSweepHonorsBannedOnlyMode(t *testing.T) {
+	config := &model.ChannelMonitorConfig{MonitorMode: model.ChannelMonitorModeBannedOnly}
+	require.NoError(t, config.SetMonitoredModels([]string{"active", "banned", "confirming"}))
+	states := map[string]*model.ChannelManagedState{
+		"active":     {BanState: model.ManagedBanStateActive},
+		"banned":     {BanState: model.ManagedBanStateBanned},
+		"confirming": {BanState: model.ManagedBanStateActive, ConfirmCount: 1},
+	}
+
+	assert.Equal(t, []string{"banned", "confirming"}, channelMonitorModelsForSweep(config, states))
+
+	config.MonitorMode = model.ChannelMonitorModeDefault
+	assert.Equal(t, []string{"active", "banned", "confirming"}, channelMonitorModelsForSweep(config, states))
+
+	config.MonitorMode = model.ChannelMonitorModeBannedOnly
+	config.NextCheckAt = -1
+	assert.Equal(t, []string{"active", "banned", "confirming"}, channelMonitorModelsForSweep(config, states))
+}

@@ -55,11 +55,14 @@ for (const key of domGlobals) {
 
 const { act, useState } = await import('react')
 const { createRoot } = await import('react-dom/client')
+const { QueryClient, QueryClientProvider } =
+  await import('@tanstack/react-query')
 const { createInstance } = await import('i18next')
 const { I18nextProvider, initReactI18next } = await import('react-i18next')
 const { TooltipProvider } = await import('@/components/ui/tooltip')
 const { api } = await import('@/lib/api')
 const { DetectionConfigPanel } = await import('../detection-config-panel')
+const { ModelMonitoringSwitch } = await import('../model-monitoring-switch')
 
 const i18n = createInstance()
 await i18n.use(initReactI18next).init({
@@ -163,20 +166,45 @@ async function waitForCondition(
 function DetectionConfigHarness() {
   const [endpointType, setEndpointType] = useState('auto')
   const [stream, setStream] = useState(false)
+  const [monitoringEnabled, setMonitoringEnabled] = useState(false)
+  const [managed, setManaged] = useState(false)
+  const [monitoredModels, setMonitoredModels] = useState<string[]>([])
+  const [queryClient] = useState(() => new QueryClient())
+  return (
+    <QueryClientProvider client={queryClient}>
+      <I18nextProvider i18n={i18n}>
+        <TooltipProvider>
+          <DetectionConfigPanel
+            open
+            channelId={12}
+            monitoringEnabled={monitoringEnabled}
+            managed={managed}
+            monitoredModels={monitoredModels}
+            endpointType={endpointType}
+            stream={stream}
+            onMonitoringEnabledChange={setMonitoringEnabled}
+            onManagedChange={setManaged}
+            onMonitoredModelsChange={setMonitoredModels}
+            onEndpointTypeChange={setEndpointType}
+            onStreamChange={setStream}
+          />
+          <output data-testid='endpoint-type'>{endpointType}</output>
+          <output data-testid='stream'>{String(stream)}</output>
+        </TooltipProvider>
+      </I18nextProvider>
+    </QueryClientProvider>
+  )
+}
+
+function ModelMonitoringHarness() {
+  const [checked, setChecked] = useState(false)
   return (
     <I18nextProvider i18n={i18n}>
-      <TooltipProvider>
-        <DetectionConfigPanel
-          open
-          channelId={12}
-          endpointType={endpointType}
-          stream={stream}
-          onEndpointTypeChange={setEndpointType}
-          onStreamChange={setStream}
-        />
-        <output data-testid='endpoint-type'>{endpointType}</output>
-        <output data-testid='stream'>{String(stream)}</output>
-      </TooltipProvider>
+      <ModelMonitoringSwitch
+        model='gpt-test'
+        checked={checked}
+        onCheckedChange={() => setChecked((current) => !current)}
+      />
     </I18nextProvider>
   )
 }
@@ -189,7 +217,7 @@ function findButton(label: string): HTMLButtonElement {
   return button
 }
 
-describe('channel detection template configuration', () => {
+describe('channel test monitoring configuration', () => {
   after(() => {
     apiClient.get = originalGet
     apiClient.put = originalPut
@@ -251,12 +279,31 @@ describe('channel detection template configuration', () => {
       null
     )
 
+    const monitoringSwitch = host.querySelector<HTMLButtonElement>(
+      '#channel-monitoring-enabled'
+    )
+    const managedSwitch =
+      host.querySelector<HTMLButtonElement>('#channel-managed')
+    assert.ok(monitoringSwitch)
+    assert.ok(managedSwitch)
+    await act(async () => {
+      monitoringSwitch.click()
+      managedSwitch.click()
+      findButton('Banned-only probing').click()
+    })
+
     await act(async () => findButton('Save detection config').click())
     await waitForCondition(() => savedPayload !== null, 'config was not saved')
 
     assert.deepEqual(savedPayload, {
       id: 0,
       channel_id: 12,
+      enabled: true,
+      managed: true,
+      monitor_mode: 'banned_only',
+      interval_seconds: 600,
+      jitter_seconds: 60,
+      monitored_models: [],
       endpoint_type: 'openai-response',
       stream: true,
       template_id: 5,
@@ -376,6 +423,12 @@ describe('channel detection template configuration', () => {
     assert.deepEqual(savedPayload, {
       id: 0,
       channel_id: 12,
+      enabled: false,
+      managed: false,
+      monitor_mode: 'default',
+      interval_seconds: 600,
+      jitter_seconds: 60,
+      monitored_models: [],
       endpoint_type: 'auto',
       stream: false,
       template_id: 0,
@@ -383,6 +436,27 @@ describe('channel detection template configuration', () => {
       body_mode: 'default',
       body_json: '',
     })
+
+    await act(async () => root.unmount())
+    host.remove()
+  })
+
+  test('toggles monitoring for the named model from the models table control', async () => {
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root = createRoot(host)
+
+    await act(async () => root.render(<ModelMonitoringHarness />))
+
+    const monitoringSwitch = host.querySelector<HTMLButtonElement>(
+      '[aria-label="Enable monitoring: gpt-test"]'
+    )
+    assert.ok(monitoringSwitch)
+    assert.equal(monitoringSwitch.getAttribute('aria-checked'), 'false')
+
+    await act(async () => monitoringSwitch.click())
+
+    assert.equal(monitoringSwitch.getAttribute('aria-checked'), 'true')
 
     await act(async () => root.unmount())
     host.remove()

@@ -18,7 +18,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestChannelMonitorMasterSwitchStopsSchedulerTaskAndPolicy(t *testing.T) {
+func TestChannelMonitorMasterSwitchStopsPeriodicSchedulerWithoutPendingProbe(t *testing.T) {
 	setting := operation_setting.GetChannelMonitorSetting()
 	originalEnabled := setting.Enabled
 	originalDB := model.DB
@@ -34,8 +34,70 @@ func TestChannelMonitorMasterSwitchStopsSchedulerTaskAndPolicy(t *testing.T) {
 	summary, err := runChannelMonitorTask(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, channelMonitorTaskResult{}, summary)
+}
 
-	assert.NotPanics(t, runChannelManagedPolicy)
+func TestChannelMonitorHandlerSchedulesManagedErrorProbeWhenMonitoringDisabled(t *testing.T) {
+	previousDB := model.DB
+	setting := operation_setting.GetChannelMonitorSetting()
+	previousEnabled := setting.Enabled
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.ChannelMonitorConfig{}))
+	model.DB = db
+	setting.Enabled = false
+	t.Cleanup(func() {
+		model.DB = previousDB
+		setting.Enabled = previousEnabled
+		sqlDB, sqlErr := db.DB()
+		if sqlErr == nil {
+			_ = sqlDB.Close()
+		}
+	})
+
+	config := model.ChannelMonitorConfig{ChannelId: 41, Enabled: false, Managed: true}
+	require.NoError(t, db.Create(&config).Error)
+	affected, err := model.AdvanceManagedErrorProbeDue(config.ChannelId)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), affected)
+
+	assert.True(t, channelMonitorHandler{}.Enabled())
+}
+
+func TestManagedPolicyAppliesToHostedChannelWhenMonitoringDisabled(t *testing.T) {
+	db := newBanStageTestDB(t)
+	monitorSetting := operation_setting.GetChannelMonitorSetting()
+	previousMonitorEnabled := monitorSetting.Enabled
+	policySetting := operation_setting.GetManagedPolicySetting()
+	previousPolicySetting := *policySetting
+	monitorSetting.Enabled = false
+	policySetting.BanEnabled = true
+	policySetting.ConfirmCount = 1
+	policySetting.SpeedEnabled = false
+	t.Cleanup(func() {
+		monitorSetting.Enabled = previousMonitorEnabled
+		*policySetting = previousPolicySetting
+	})
+
+	const channelID = 43
+	require.NoError(t, db.Create(&model.Channel{
+		Id: channelID, Name: "hosted-with-monitoring-paused", Status: common.ChannelStatusEnabled, Models: "model-a",
+	}).Error)
+	require.NoError(t, db.Create(&model.Ability{
+		Group: "default", Model: "model-a", ChannelId: channelID, Enabled: true,
+	}).Error)
+	config := model.ChannelMonitorConfig{ChannelId: channelID, Enabled: false, Managed: true}
+	require.NoError(t, config.SetMonitoredModels([]string{"model-a"}))
+	require.NoError(t, db.Create(&config).Error)
+	require.NoError(t, db.Create(&model.ChannelMonitorResult{
+		ChannelId: channelID, ModelName: "model-a", Success: false, CheckedAt: common.GetTimestamp(),
+	}).Error)
+
+	runChannelManagedPolicy()
+
+	var ability model.Ability
+	require.NoError(t, db.Where("channel_id = ? AND model = ?", channelID, "model-a").First(&ability).Error)
+	assert.False(t, ability.Enabled)
 }
 
 func TestProbeChannelMonitorNowIgnoresSchedulerSwitches(t *testing.T) {

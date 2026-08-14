@@ -132,6 +132,21 @@ func ResetChannelModelErrorProbeIfEnabled(channelId int, modelName string) {
 	ResetChannelModelErrorProbe(channelId, modelName)
 }
 
+// managedErrorProbeCoversModel reports whether hosting owns error handling for
+// one configured model. Periodic monitoring is intentionally not part of this
+// decision: Managed is the authoritative switch for the error policy.
+func managedErrorProbeCoversModel(config *model.ChannelMonitorConfig, modelName string) bool {
+	if config == nil || !config.Managed || modelName == "" {
+		return false
+	}
+	for _, name := range config.GetMonitoredModels() {
+		if name == modelName {
+			return true
+		}
+	}
+	return false
+}
+
 // TryDeferChannelDisableToProbe decides, for a normal-forwarding error, whether
 // to hand a managed channel's fate to the monitor/managed policy instead of
 // letting the caller auto-disable the whole channel.
@@ -144,15 +159,16 @@ func ResetChannelModelErrorProbeIfEnabled(channelId int, modelName string) {
 // or skip-retry error never feeds the counter.
 //
 // It returns true when it has taken ownership of the error (the caller must NOT
-// auto-disable): this happens for a probe-worthy error on a managed channel whose
-// monitor config is enabled and actually monitors the erroring model. The error
-// is counted, and once a stable streak reaches the threshold the channel's next
-// probe is advanced so the managed ban/recover state machine — not this single
-// error — decides the channel's fate.
+// auto-disable): this happens for a probe-worthy error on a managed channel that
+// includes the erroring model in its probe configuration. Periodic monitoring
+// may be paused; hosting alone keeps this policy active. The error is counted,
+// and once a stable streak reaches the threshold a one-shot probe is queued so
+// the managed ban/recover state machine — not this single error — decides the
+// channel's fate.
 //
 // It returns false (caller keeps its own auto-disable behavior) when the feature
 // is off, the error is not a real fault, the model name is unknown, or the
-// channel is not a managed + enabled + monitored pair.
+// channel is not a managed + configured-model pair.
 func TryDeferChannelDisableToProbe(channelId int, modelName string, err *types.NewAPIError) bool {
 	if !operation_setting.GetManagedPolicySetting().ErrorTriggerProbeEnabled {
 		return false
@@ -168,25 +184,15 @@ func TryDeferChannelDisableToProbe(channelId int, modelName string, err *types.N
 		common.SysError(fmt.Sprintf("error-triggered probe: load monitor config for channel %d failed: %v", channelId, configErr))
 		return false
 	}
-	if config == nil || !config.Enabled || !config.Managed {
-		return false
-	}
-	monitored := false
-	for _, name := range config.GetMonitoredModels() {
-		if name == modelName {
-			monitored = true
-			break
-		}
-	}
-	if !monitored {
+	if !managedErrorProbeCoversModel(config, modelName) {
 		return false
 	}
 
 	if BumpChannelModelErrorProbe(channelId, modelName) {
-		if _, err := model.AdvanceChannelMonitorConfigDue(channelId); err != nil {
+		if _, err := model.AdvanceManagedErrorProbeDue(channelId); err != nil {
 			common.SysError(fmt.Sprintf("error-triggered probe: advance probe for channel %d failed: %v", channelId, err))
 		} else {
-			common.SysLog(fmt.Sprintf("error-triggered probe: channel %d model %s reached error threshold, advancing monitor probe", channelId, modelName))
+			common.SysLog(fmt.Sprintf("error-triggered probe: channel %d model %s reached error threshold, queued managed probe", channelId, modelName))
 		}
 	}
 	return true

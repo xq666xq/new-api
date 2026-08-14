@@ -72,7 +72,6 @@ import {
   getManagedPolicy,
   getMonitorQuestions,
   getMonitorTemplates,
-  runChannelMonitorProbe,
   saveChannelMonitorConfig,
   saveChannelRecommendations,
   triggerChannelMonitorNow,
@@ -226,6 +225,9 @@ function summarizeConfig(
 ): string {
   if (!row.config) return '—'
   const parts: string[] = []
+  if (row.config.monitorMode === 'banned_only') {
+    parts.push(t('Banned-only probing'))
+  }
   if (row.config.jitterSeconds > 0) {
     parts.push(
       t('Every {{count}}s ±{{jitter}}s', {
@@ -640,16 +642,6 @@ export function ChannelMonitor() {
     },
   })
 
-  const toggleEnabled = (row: ChannelMonitorRow, enabled: boolean) => {
-    if (!row.config) return
-    saveConfig.mutate({ id: row.id, config: { ...row.config, enabled } })
-  }
-
-  const toggleManaged = (row: ChannelMonitorRow, managed: boolean) => {
-    if (!row.config) return
-    saveConfig.mutate({ id: row.id, config: { ...row.config, managed } })
-  }
-
   const saveQuestion = useMutation({
     mutationFn: (question: MonitorQuestion) =>
       question.id > 0
@@ -708,42 +700,17 @@ export function ChannelMonitor() {
     },
   })
 
-  const manualProbe = useMutation({
-    mutationFn: ({
-      channelId,
-      modelName,
-    }: {
-      channelId: number
-      modelName: string
-    }) => runChannelMonitorProbe(channelId, modelName),
-    gcTime: 0,
-    onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: ['channel-monitor', 'status'],
-      })
-    },
-  })
-
   const openManualProbe = (row: ChannelMonitorRow) => {
-    manualProbe.reset()
     setProbeModel(getManualProbeModels(row)[0] ?? '')
     setProbing(row)
   }
 
   const selectManualProbeModel = (modelName: string) => {
     if (modelName === probeModel) return
-    manualProbe.reset()
     setProbeModel(modelName)
   }
 
-  const runManualProbe = () => {
-    if (!probing || !probeModel) return
-    manualProbe.reset()
-    manualProbe.mutate({ channelId: probing.id, modelName: probeModel })
-  }
-
   const closeManualProbe = () => {
-    manualProbe.reset()
     setProbeModel('')
     setProbing(null)
   }
@@ -849,10 +816,6 @@ export function ChannelMonitor() {
                   <TableHead>{t('Channel')}</TableHead>
                   <TableHead>{t('Models')}</TableHead>
                   <TableHead>{t('Monitoring')}</TableHead>
-                  <TableHead className='text-center'>
-                    {t('Channel hosting')}
-                  </TableHead>
-                  <TableHead className='text-center'>{t('Enabled')}</TableHead>
                   <TableHead>{t('Remark')}</TableHead>
                   <TableHead>{t('Strategy')}</TableHead>
                   <TableHead
@@ -866,7 +829,7 @@ export function ChannelMonitor() {
                 {isLoading && (
                   <TableRow>
                     <TableCell
-                      colSpan={8}
+                      colSpan={6}
                       className='text-muted-foreground py-8 text-center text-sm'
                     >
                       {t('Loading...')}
@@ -876,7 +839,7 @@ export function ChannelMonitor() {
                 {!isLoading && rows.length === 0 && (
                   <TableRow>
                     <TableCell
-                      colSpan={8}
+                      colSpan={6}
                       className='text-muted-foreground py-8 text-center text-sm'
                     >
                       {t('No channels have a detection config yet')}
@@ -910,28 +873,6 @@ export function ChannelMonitor() {
                       </TableCell>
                       <TableCell>
                         <StatusPills row={row} />
-                      </TableCell>
-                      <TableCell>
-                        <div className='flex min-w-0 items-center'>
-                          <Switch
-                            checked={row.config?.managed ?? false}
-                            disabled={!row.config || saveConfig.isPending}
-                            aria-label={t('Channel hosting')}
-                            onCheckedChange={(managed) =>
-                              toggleManaged(row, managed)
-                            }
-                          />
-                        </div>
-                      </TableCell>
-                      <TableCell className='text-center'>
-                        <Switch
-                          checked={row.config?.enabled ?? false}
-                          disabled={!row.config || saveConfig.isPending}
-                          aria-label={t('Enable monitoring')}
-                          onCheckedChange={(enabled) =>
-                            toggleEnabled(row, enabled)
-                          }
-                        />
                       </TableCell>
                       <TableCell className='max-w-[140px]'>
                         {row.config?.remark ? (
@@ -982,10 +923,7 @@ export function ChannelMonitor() {
                                   type='button'
                                   variant='outline'
                                   size='icon-sm'
-                                  disabled={
-                                    !canRunManualProbe(row) ||
-                                    manualProbe.isPending
-                                  }
+                                  disabled={!canRunManualProbe(row)}
                                   aria-label={t('Run probe now')}
                                   onClick={() => openManualProbe(row)}
                                 />
@@ -994,9 +932,7 @@ export function ChannelMonitor() {
                               <Zap
                                 className={cn(
                                   'size-3.5',
-                                  manualProbe.isPending &&
-                                    probing?.id === row.id &&
-                                    'animate-pulse'
+                                  probing?.id === row.id && 'animate-pulse'
                                 )}
                               />
                             </TooltipTrigger>
@@ -1103,16 +1039,12 @@ export function ChannelMonitor() {
           <ManualProbeDialog
             row={probing}
             selectedModel={probeModel}
-            loading={manualProbe.isPending}
-            failed={manualProbe.isError}
-            errorMessage={
-              manualProbe.error instanceof Error
-                ? manualProbe.error.message
-                : ''
-            }
-            result={manualProbe.data?.[0] ?? null}
             onSelectModel={selectManualProbeModel}
-            onRun={runManualProbe}
+            onProbed={() =>
+              queryClient.invalidateQueries({
+                queryKey: ['channel-monitor', 'status'],
+              })
+            }
             onClose={closeManualProbe}
           />
 

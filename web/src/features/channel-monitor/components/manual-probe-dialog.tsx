@@ -27,23 +27,20 @@ import {
   RotateCcw,
   Server,
 } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Dialog } from '@/components/dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { cn } from '@/lib/utils'
 
+import { ProbeConsole } from '../../channels/components/probe-console'
+import { useStreamingProbe } from '../../channels/hooks/use-streaming-probe'
+import type { ChannelMonitorProbeResult } from '../../channels/types'
 import { getManualProbeModels } from '../probe-availability'
 import {
   formatProbeBody,
@@ -51,17 +48,14 @@ import {
   formatProbeDuration,
   formatProbeHeaders,
 } from '../probe-display'
-import type { ChannelMonitorRow, ManualMonitorProbeResult } from '../types'
+import type { ChannelMonitorRow } from '../types'
 
 type ManualProbeDialogProps = {
   row: ChannelMonitorRow | null
   selectedModel: string
-  loading: boolean
-  failed: boolean
-  errorMessage: string
-  result: ManualMonitorProbeResult | null
   onSelectModel: (modelName: string) => void
-  onRun: () => void
+  /** Refresh the monitor list once a probe has written its record. */
+  onProbed: () => void
   onClose: () => void
 }
 
@@ -103,7 +97,7 @@ function TraceBlock(props: {
   )
 }
 
-function ProbeResultDetails(props: { result: ManualMonitorProbeResult }) {
+function ProbeResultDetails(props: { result: ChannelMonitorProbeResult }) {
   const { t } = useTranslation()
   const result = props.result
   const trace = result.trace
@@ -216,18 +210,40 @@ function ProbeResultDetails(props: { result: ManualMonitorProbeResult }) {
 
 export function ManualProbeDialog(props: ManualProbeDialogProps) {
   const { t } = useTranslation()
+  const [viewMode, setViewMode] = useState<'console' | 'trace'>('console')
+  const probe = useStreamingProbe()
+  const {
+    lines: consoleLines,
+    running: loading,
+    result: probeResult,
+    error: errorMessage,
+  } = probe
+
+  const rowId = props.row?.id ?? 0
+  const { reset: resetProbe, abort: abortProbe } = probe
+
+  // A different channel or model means the previous transcript no longer
+  // describes what the dialog is about to run.
+  useEffect(() => {
+    resetProbe()
+    setViewMode('console')
+    return abortProbe
+  }, [abortProbe, resetProbe, rowId, props.selectedModel])
+
+  const runProbe = useCallback(() => {
+    if (!rowId || !props.selectedModel) return
+    setViewMode('console')
+    void probe.run(rowId, props.selectedModel).then(props.onProbed)
+  }, [probe, props.onProbed, props.selectedModel, rowId])
 
   if (!props.row) return null
 
   const models = getManualProbeModels(props.row)
-  const modelItems = models.map((modelName) => ({
-    label: modelName,
-    value: modelName,
-  }))
   const result =
-    props.result?.modelName === props.selectedModel ? props.result : null
-  const canRun = props.selectedModel !== '' && !props.loading
-  const hasOutcome = result !== null || props.failed
+    probeResult?.modelName === props.selectedModel ? probeResult : null
+  const failed = errorMessage !== ''
+  const canRun = props.selectedModel !== '' && !loading
+  const hasOutcome = result !== null || failed
 
   let statusIcon = (
     <Activity className='text-primary size-5' aria-hidden='true' />
@@ -237,7 +253,7 @@ export function ManualProbeDialog(props: ManualProbeDialogProps) {
     'Using the same request assembly and relay path as scheduled monitoring.'
   )
   let statusClassName = 'border-primary/20 bg-primary/5'
-  if (props.loading) {
+  if (loading) {
     statusIcon = (
       <Loader2
         className='text-primary size-5 animate-spin'
@@ -245,13 +261,13 @@ export function ManualProbeDialog(props: ManualProbeDialogProps) {
       />
     )
     statusTitle = t('Running real probe...')
-  } else if (props.failed) {
+  } else if (failed) {
     statusIcon = (
       <AlertCircle className='text-destructive size-5' aria-hidden='true' />
     )
     statusTitle = t('Manual probe failed')
     statusDescription =
-      props.errorMessage ||
+      errorMessage ||
       t(
         'Using the same request assembly and relay path as scheduled monitoring.'
       )
@@ -271,7 +287,7 @@ export function ManualProbeDialog(props: ManualProbeDialogProps) {
 
   let actionIcon = <Play data-icon='inline-start' aria-hidden='true' />
   let actionLabel = t('Start probe')
-  if (props.loading) {
+  if (loading) {
     actionIcon = (
       <Loader2
         data-icon='inline-start'
@@ -295,20 +311,26 @@ export function ManualProbeDialog(props: ManualProbeDialogProps) {
       description={`${props.row.name} · ${t('The request and response details below are returned only once and are not stored.')}`}
       contentClassName={cn(
         'transition-[max-width]',
-        result ? 'sm:max-w-6xl' : 'sm:max-w-2xl'
+        // Only the raw request/response trace needs the wide layout; the console
+        // reads better in a narrower column.
+        viewMode === 'trace' && result ? 'sm:max-w-6xl' : 'sm:max-w-2xl'
       )}
-      contentHeight={result ? 'min(720px, calc(100vh - 12rem))' : 'auto'}
+      contentHeight={
+        consoleLines.length > 0 || loading
+          ? 'min(720px, calc(100vh - 12rem))'
+          : 'auto'
+      }
       footer={
         <>
           <Button
             type='button'
             variant='outline'
-            disabled={props.loading}
+            disabled={loading}
             onClick={props.onClose}
           >
             {t('Close')}
           </Button>
-          <Button type='button' disabled={!canRun} onClick={props.onRun}>
+          <Button type='button' disabled={!canRun} onClick={runProbe}>
             {actionIcon}
             {actionLabel}
           </Button>
@@ -368,31 +390,38 @@ export function ManualProbeDialog(props: ManualProbeDialogProps) {
         </section>
 
         <section className='space-y-2'>
-          <Label htmlFor='manual-probe-model'>{t('Test model')}</Label>
-          <Select
-            items={modelItems}
-            value={props.selectedModel}
-            disabled={props.loading}
-            onValueChange={(value) => {
-              if (typeof value === 'string') props.onSelectModel(value)
-            }}
-          >
-            <SelectTrigger
-              id='manual-probe-model'
-              className='h-10 w-full min-w-0 rounded-lg'
+          <div className='text-sm font-medium'>{t('Test model')}</div>
+          {models.length > 0 ? (
+            <RadioGroup
+              value={props.selectedModel}
+              disabled={loading}
+              onValueChange={(value) => {
+                if (typeof value === 'string') props.onSelectModel(value)
+              }}
+              aria-label={t('Test model')}
+              className='max-h-56 grid-cols-1 overflow-y-auto pr-1 sm:grid-cols-2'
             >
-              <SelectValue className='min-w-0 truncate font-mono' />
-            </SelectTrigger>
-            <SelectContent alignItemWithTrigger={false}>
-              <SelectGroup>
-                {models.map((modelName) => (
-                  <SelectItem key={modelName} value={modelName}>
-                    <span className='font-mono'>{modelName}</span>
-                  </SelectItem>
-                ))}
-              </SelectGroup>
-            </SelectContent>
-          </Select>
+              {models.map((modelName, index) => {
+                const modelId = `manual-probe-model-${props.row?.id}-${index}`
+                return (
+                  <label
+                    key={modelName}
+                    htmlFor={modelId}
+                    className='hover:border-primary/40 has-data-[checked]:border-primary has-data-[checked]:ring-primary/20 flex min-w-0 cursor-pointer items-center gap-2 rounded-lg border px-3 py-2.5 transition-colors has-data-disabled:cursor-not-allowed has-data-disabled:opacity-60 has-data-[checked]:ring-2'
+                  >
+                    <RadioGroupItem id={modelId} value={modelName} />
+                    <span className='min-w-0 font-mono text-sm leading-5 break-all'>
+                      {modelName}
+                    </span>
+                  </label>
+                )
+              })}
+            </RadioGroup>
+          ) : (
+            <div className='text-muted-foreground rounded-lg border px-3 py-4 text-sm'>
+              {t('No models available')}
+            </div>
+          )}
         </section>
 
         <section
@@ -413,15 +442,44 @@ export function ManualProbeDialog(props: ManualProbeDialogProps) {
           </div>
         </section>
 
-        {result ? (
-          <div className='space-y-4 border-t pt-4'>
-            <div className='border-success/20 bg-success/5 text-success flex items-center gap-2 rounded-xl border px-3 py-2 text-xs'>
-              <CheckCircle2 className='size-4 shrink-0' aria-hidden='true' />
-              {t(
-                'Basic probe records were saved; raw request and response details were not saved.'
-              )}
+        {consoleLines.length > 0 || loading ? (
+          <div className='space-y-3 border-t pt-4'>
+            <div className='flex flex-wrap items-center justify-between gap-2'>
+              <div className='text-sm font-medium'>{t('Live output')}</div>
+              <ToggleGroup
+                value={[viewMode]}
+                onValueChange={(value) => {
+                  const next = value[0]
+                  if (next === 'console' || next === 'trace') setViewMode(next)
+                }}
+                variant='outline'
+                size='sm'
+                aria-label={t('Live output')}
+              >
+                <ToggleGroupItem value='console'>
+                  {t('Console')}
+                </ToggleGroupItem>
+                <ToggleGroupItem value='trace' disabled={result === null}>
+                  {t('Request details')}
+                </ToggleGroupItem>
+              </ToggleGroup>
             </div>
-            <ProbeResultDetails result={result} />
+
+            {viewMode === 'console' ? (
+              <ProbeConsole lines={consoleLines} running={loading} />
+            ) : null}
+
+            {viewMode === 'trace' && result ? (
+              <div className='space-y-4'>
+                <div className='border-success/20 bg-success/5 text-success flex items-center gap-2 rounded-xl border px-3 py-2 text-xs'>
+                  <CheckCircle2 className='size-4 shrink-0' aria-hidden='true' />
+                  {t(
+                    'Basic probe records were saved; raw request and response details were not saved.'
+                  )}
+                </div>
+                <ProbeResultDetails result={result} />
+              </div>
+            ) : null}
           </div>
         ) : null}
       </div>

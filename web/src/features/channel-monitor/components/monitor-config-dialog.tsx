@@ -35,6 +35,7 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { cn } from '@/lib/utils'
 
 import {
@@ -102,11 +103,17 @@ function MonitorConfigDialogInner({
 
   const streamDisabled = STREAM_INCOMPATIBLE_ENDPOINTS.has(config.endpointType)
   const effectiveStream = streamDisabled ? false : config.stream
+  const monitorModeDescription =
+    config.monitorMode === 'banned_only'
+      ? t(
+          'Only probes banned models and pending ban confirmations, so healthy models are left alone.'
+        )
+      : t('Probes every monitored model on each interval.')
   let bodyModeDescription = t('Use the endpoint default probe body as-is.')
-	if (config.bodyMode === 'merge') {
-		bodyModeDescription = t(
-			'Shallow-merge your fields over the default body; same-level keys with the same name are overwritten. Use Override when you need to replace the entire body.'
-		)
+  if (config.bodyMode === 'merge') {
+    bodyModeDescription = t(
+      'Shallow-merge your fields over the default body; same-level keys with the same name are overwritten. Use Override when you need to replace the entire body.'
+    )
   } else if (config.bodyMode === 'override') {
     bodyModeDescription = t(
       'Replace the default body entirely with the JSON below, including model/messages/contents.'
@@ -144,14 +151,6 @@ function MonitorConfigDialogInner({
     setAdvancedOpen(true)
     toast.success(t('Template applied as a snapshot'))
   }
-
-  const toggleModel = (model: string) =>
-    setConfig((prev) => ({
-      ...prev,
-      monitoredModels: prev.monitoredModels.includes(model)
-        ? prev.monitoredModels.filter((m) => m !== model)
-        : [...prev.monitoredModels, model],
-    }))
 
   const formatBody = () => {
     const raw = config.bodyJson.trim()
@@ -263,10 +262,38 @@ function MonitorConfigDialogInner({
           </div>
         </div>
 
+        <div className='grid gap-2'>
+          <Label id='monitor-mode-label'>{t('Monitoring mode')}</Label>
+          <ToggleGroup
+            value={[config.monitorMode]}
+            onValueChange={(values) => {
+              const value = values[0]
+              if (value === 'default' || value === 'banned_only') {
+                patch({ monitorMode: value })
+              }
+            }}
+            variant='outline'
+            className='grid w-full grid-cols-2'
+            aria-labelledby='monitor-mode-label'
+          >
+            <ToggleGroupItem value='default'>
+              {t('Default probing')}
+            </ToggleGroupItem>
+            <ToggleGroupItem value='banned_only'>
+              {t('Banned-only probing')}
+            </ToggleGroupItem>
+          </ToggleGroup>
+          <p className='text-muted-foreground text-xs'>
+            {monitorModeDescription}
+          </p>
+        </div>
+
         {/* Interval + jitter (seconds) */}
         <div className='grid gap-4 md:grid-cols-2'>
           <div className='grid gap-2'>
-            <Label htmlFor='monitor-interval'>{t('Probe interval (seconds)')}</Label>
+            <Label htmlFor='monitor-interval'>
+              {t('Probe interval (seconds)')}
+            </Label>
             <Input
               id='monitor-interval'
               type='number'
@@ -293,7 +320,9 @@ function MonitorConfigDialogInner({
             </p>
           </div>
           <div className='grid gap-2'>
-            <Label htmlFor='monitor-jitter'>{t('Random jitter (seconds)')}</Label>
+            <Label htmlFor='monitor-jitter'>
+              {t('Random jitter (seconds)')}
+            </Label>
             <Input
               id='monitor-jitter'
               type='number'
@@ -321,29 +350,6 @@ function MonitorConfigDialogInner({
           </div>
         </div>
 
-        {/* Channel hosting: hand this channel's per-model enable/priority to the
-            managed policy engine. Behavior is configured globally in the "托管策略"
-            dialog; this switch only opts the channel in. */}
-        <div className='rounded-lg border border-[#0884dd]/25 bg-[#0884dd]/5 p-3'>
-          <div className='flex items-center justify-between gap-3'>
-            <div className='min-w-0'>
-              <Label htmlFor='monitor-managed' className='text-sm font-medium'>
-                {t('Channel hosting')}
-              </Label>
-              <p className='text-muted-foreground mt-0.5 text-xs'>
-                {t(
-                  'When on, this channel is governed by the hosting policy: probes drive automatic ban/recover and speed-based up/downgrade per model.'
-                )}
-              </p>
-            </div>
-            <Switch
-              id='monitor-managed'
-              checked={config.managed}
-              onCheckedChange={(v) => patch({ managed: v })}
-            />
-          </div>
-        </div>
-
         <div className='grid gap-2'>
           <Label htmlFor='monitor-remark'>{t('Remark')}</Label>
           <Textarea
@@ -353,65 +359,6 @@ function MonitorConfigDialogInner({
             className='min-h-20 resize-none'
             onChange={(event) => patch({ remark: event.target.value })}
           />
-        </div>
-
-        {/* Monitored models: one switch per channel model */}
-        <div className='space-y-2'>
-          <div className='flex items-center justify-between'>
-            <Label>{t('Monitored models')}</Label>
-            {row.models.length > 0 ? (
-              <div className='flex items-center gap-2'>
-                <Button
-                  type='button'
-                  variant='ghost'
-                  size='sm'
-                  className='h-7 px-2 text-xs'
-                  onClick={() => patch({ monitoredModels: [...row.models] })}
-                >
-                  {t('Select all')}
-                </Button>
-                <Button
-                  type='button'
-                  variant='ghost'
-                  size='sm'
-                  className='h-7 px-2 text-xs'
-                  onClick={() => patch({ monitoredModels: [] })}
-                >
-                  {t('Select none')}
-                </Button>
-              </div>
-            ) : null}
-          </div>
-          {row.models.length === 0 ? (
-            <p className='text-muted-foreground text-xs'>
-              {t('This channel has no models configured.')}
-            </p>
-          ) : (
-            <div className='max-h-56 space-y-1.5 overflow-y-auto rounded-lg border p-2'>
-              {row.models.map((model) => {
-                const on = config.monitoredModels.includes(model)
-                return (
-                  <label
-                    key={model}
-                    className='hover:bg-muted/60 flex cursor-pointer items-center justify-between gap-3 rounded-md px-2 py-1.5'
-                  >
-                    <span className='min-w-0 truncate text-sm' title={model}>
-                      {model}
-                    </span>
-                    <Switch
-                      checked={on}
-                      onCheckedChange={() => toggleModel(model)}
-                    />
-                  </label>
-                )
-              })}
-            </div>
-          )}
-          <p className='text-muted-foreground text-xs'>
-            {t(
-              'Each enabled model is probed on its own; the channel switch above must also be on.'
-            )}
-          </p>
         </div>
 
         {/* Advanced (optional) */}

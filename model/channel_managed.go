@@ -239,12 +239,13 @@ func DeleteChannelManagedStatesByChannel(channelId int) error {
 	return DB.Where("channel_id = ?", channelId).Delete(&ChannelManagedState{}).Error
 }
 
-// GetManagedChannelMonitorConfigs returns the enabled monitor configs whose
-// channel opted into policy management (Managed = true). The policy engine only
-// touches these channels; everything else keeps its manual behavior.
+// GetManagedChannelMonitorConfigs returns configs whose channel opted into
+// policy management (Managed = true). Hosting remains authoritative when
+// periodic monitoring is paused: scheduled probes stop, but error-triggered
+// probes and their policy decisions still apply.
 func GetManagedChannelMonitorConfigs() ([]*ChannelMonitorConfig, error) {
 	var configs []*ChannelMonitorConfig
-	if err := DB.Where("enabled = ? AND managed = ?", true, true).Find(&configs).Error; err != nil {
+	if err := DB.Where("managed = ?", true).Find(&configs).Error; err != nil {
 		return nil, err
 	}
 	return configs, nil

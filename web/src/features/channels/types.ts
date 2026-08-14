@@ -193,6 +193,7 @@ export interface ChannelTestResponse {
 }
 
 export type MonitorBodyMode = 'default' | 'merge' | 'override'
+export type ChannelMonitorMode = 'default' | 'banned_only'
 
 export interface MonitorHeader {
   id: string
@@ -203,6 +204,12 @@ export interface MonitorHeader {
 export interface ChannelMonitorConfig {
   id: number
   channelId: number
+  enabled: boolean
+  managed: boolean
+  monitorMode: ChannelMonitorMode
+  intervalSeconds: number
+  jitterSeconds: number
+  monitoredModels: string[]
   endpointType: string
   stream: boolean
   templateId: number
@@ -253,6 +260,30 @@ export interface ChannelMonitorProbeResult {
   errorMessage: string
   checkedAt: number
   trace: MonitorProbeTrace
+}
+
+/** Emitted once before a model's upstream request is assembled. */
+export interface ProbeStreamStart {
+  modelName: string
+  endpointType: string
+  stream: boolean
+  questionId: number
+  questionContent: string
+  channelName: string
+  channelType: number
+}
+
+/** One raw upstream response fragment, exactly as read off the wire. */
+export interface ProbeStreamChunk {
+  modelName: string
+  delta: string
+}
+
+export interface ProbeStreamHandlers {
+  onStart?: (event: ProbeStreamStart) => void
+  onChunk?: (event: ProbeStreamChunk) => void
+  onResult?: (result: ChannelMonitorProbeResult) => void
+  onError?: (message: string) => void
 }
 
 export interface ChannelBalanceResponse {

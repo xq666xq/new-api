@@ -107,6 +107,22 @@ func TestNormalizeMonitorRequestSettingsRejectsProtectedHeaders(t *testing.T) {
 	}
 }
 
+func TestNormalizeMonitorConfigUsesScheduleDefaults(t *testing.T) {
+	config := &model.ChannelMonitorConfig{
+		ChannelId:    1,
+		EndpointType: "auto",
+		BodyMode:     model.MonitorBodyModeDefault,
+	}
+
+	require.NoError(t, normalizeMonitorConfig(config))
+	assert.Equal(t, model.ChannelMonitorModeDefault, config.MonitorMode)
+	assert.Equal(t, model.ChannelMonitorDefaultIntervalSeconds, config.IntervalSeconds)
+	assert.Equal(t, model.ChannelMonitorDefaultJitterSeconds, config.JitterSeconds)
+
+	config.MonitorMode = "unsupported"
+	require.ErrorContains(t, normalizeMonitorConfig(config), "unsupported monitor mode")
+}
+
 func TestSaveChannelDetectionConfigPreservesMonitorScheduling(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := newChannelMonitorControllerDB(t)
@@ -121,6 +137,7 @@ func TestSaveChannelDetectionConfigPreservesMonitorScheduling(t *testing.T) {
 		ChannelId:       12,
 		Enabled:         true,
 		Managed:         true,
+		MonitorMode:     model.ChannelMonitorModeBannedOnly,
 		EndpointType:    "openai",
 		Stream:          true,
 		IntervalSeconds: 300,
@@ -152,6 +169,7 @@ func TestSaveChannelDetectionConfigPreservesMonitorScheduling(t *testing.T) {
 	assert.Equal(t, config.Id, loaded.Id)
 	assert.True(t, loaded.Enabled)
 	assert.True(t, loaded.Managed)
+	assert.Equal(t, model.ChannelMonitorModeBannedOnly, loaded.MonitorMode)
 	assert.Equal(t, 300, loaded.IntervalSeconds)
 	assert.Equal(t, 20, loaded.JitterSeconds)
 	assert.Equal(t, int64(111), loaded.LastCheckedAt)
@@ -162,6 +180,49 @@ func TestSaveChannelDetectionConfigPreservesMonitorScheduling(t *testing.T) {
 	assert.Equal(t, model.MonitorBodyModeMerge, loaded.BodyMode)
 	require.Len(t, loaded.GetHeaders(), 1)
 	assert.Equal(t, "X-New", loaded.GetHeaders()[0].Key)
+}
+
+func TestSaveChannelDetectionConfigUpdatesMonitoringControls(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newChannelMonitorControllerDB(t)
+
+	require.NoError(t, db.Create(&model.Channel{
+		Id:     13,
+		Name:   "monitor-controls",
+		Key:    "test-key",
+		Models: "gpt-test,claude-test",
+	}).Error)
+	config := &model.ChannelMonitorConfig{
+		ChannelId:       13,
+		MonitorMode:     model.ChannelMonitorModeDefault,
+		IntervalSeconds: model.ChannelMonitorDefaultIntervalSeconds,
+		JitterSeconds:   model.ChannelMonitorDefaultJitterSeconds,
+		BodyMode:        model.MonitorBodyModeDefault,
+	}
+	require.NoError(t, config.SetMonitoredModels([]string{"gpt-test"}))
+	require.NoError(t, db.Create(config).Error)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(
+		http.MethodPut,
+		"/api/channel_monitor/config",
+		strings.NewReader(`{"channel_id":13,"enabled":true,"managed":true,"monitor_mode":"banned_only","interval_seconds":900,"jitter_seconds":90,"monitored_models":["claude-test","unknown"],"endpoint_type":"auto","stream":false,"template_id":0,"headers":[],"body_mode":"default","body_json":""}`),
+	)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	SaveChannelDetectionConfig(ctx)
+
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	loaded, err := model.GetChannelMonitorConfig(13)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.True(t, loaded.Enabled)
+	assert.True(t, loaded.Managed)
+	assert.Equal(t, model.ChannelMonitorModeBannedOnly, loaded.MonitorMode)
+	assert.Equal(t, 900, loaded.IntervalSeconds)
+	assert.Equal(t, 90, loaded.JitterSeconds)
+	assert.Equal(t, []string{"claude-test"}, loaded.GetMonitoredModels())
 }
 
 func TestGetChannelMonitorConfigResolvesLegacyTemplateName(t *testing.T) {

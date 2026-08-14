@@ -56,6 +56,9 @@ type MonitorProbeTrace struct {
 	responseHeaders http.Header
 	responseBody    bytes.Buffer
 	responseBodyCut bool
+
+	onResponseWrite func(chunk []byte)
+	firstChunkSent  bool
 }
 
 type monitorProbeTraceWriter struct {
@@ -65,8 +68,6 @@ type monitorProbeTraceWriter struct {
 
 func (w monitorProbeTraceWriter) Write(p []byte) (int, error) {
 	w.trace.mu.Lock()
-	defer w.trace.mu.Unlock()
-
 	buffer := &w.trace.requestBody
 	truncated := &w.trace.requestBodyCut
 	if w.response {
@@ -84,6 +85,22 @@ func (w monitorProbeTraceWriter) Write(p []byte) (int, error) {
 	if len(p) > remaining {
 		*truncated = true
 	}
+
+	// 流式回调：在锁内检查并标记首次写入，在锁外调用回调
+	cb := w.trace.onResponseWrite
+	isFirstChunk := w.response && !w.trace.firstChunkSent && len(p) > 0
+	if isFirstChunk {
+		w.trace.firstChunkSent = true
+	}
+	w.trace.mu.Unlock()
+
+	if w.response && cb != nil && len(p) > 0 {
+		// 复制一份避免调用者持有原始切片
+		chunk := make([]byte, len(p))
+		copy(chunk, p)
+		cb(chunk)
+	}
+
 	// The capture is observational. Always report the original byte count so a
 	// full in-memory buffer never changes the request or response read path.
 	return len(p), nil
@@ -92,6 +109,19 @@ func (w monitorProbeTraceWriter) Write(p []byte) (int, error) {
 type monitorProbeTraceReadCloser struct {
 	io.Reader
 	io.Closer
+}
+
+// SetOnResponseWrite registers a callback invoked with each upstream response
+// chunk as the adaptor reads it. Only manual (administrator-triggered) probes
+// set it; scheduled probes leave it nil and pay no streaming cost. The callback
+// runs on the goroutine reading the response body, so it must not block.
+func (t *MonitorProbeTrace) SetOnResponseWrite(fn func(chunk []byte)) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.onResponseWrite = fn
+	t.mu.Unlock()
 }
 
 // AttachRequest instruments a fully assembled upstream request immediately
@@ -128,6 +158,7 @@ func (t *MonitorProbeTrace) AttachRequest(req *http.Request) *http.Request {
 	t.responseHeaders = nil
 	t.responseBody.Reset()
 	t.responseBodyCut = false
+	t.firstChunkSent = false
 	t.mu.Unlock()
 
 	clientTrace := &httptrace.ClientTrace{

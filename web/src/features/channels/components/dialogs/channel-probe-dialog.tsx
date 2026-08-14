@@ -25,6 +25,8 @@ import {
   Play,
   RotateCcw,
   Server,
+  SquareCode,
+  Terminal,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -34,9 +36,11 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { cn } from '@/lib/utils'
 
-import { getChannelMonitorConfig, probeChannelNow } from '../../api'
+import { getChannelMonitorConfig } from '../../api'
+import { useStreamingProbe } from '../../hooks/use-streaming-probe'
 import { getChannelTypeLabel, isChannelEnabled } from '../../lib'
 import type {
   Channel,
@@ -44,6 +48,7 @@ import type {
   ChannelMonitorProbeResult,
 } from '../../types'
 import { useChannels } from '../channels-provider'
+import { ProbeConsole } from '../probe-console'
 
 type ChannelProbeDialogProps = {
   open: boolean
@@ -254,9 +259,10 @@ function ChannelProbeDialogContent(
   const [config, setConfig] = useState<ChannelMonitorConfig | null>(null)
   const [configLoading, setConfigLoading] = useState(false)
   const [configError, setConfigError] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
-  const [result, setResult] = useState<ChannelMonitorProbeResult | null>(null)
+
+  const [viewMode, setViewMode] = useState<'console' | 'trace'>('console')
+  const probe = useStreamingProbe()
+  const { lines: consoleLines, running: loading, result, error } = probe
 
   useEffect(() => {
     if (!props.open) return
@@ -264,11 +270,11 @@ function ChannelProbeDialogContent(
     const initialModel =
       defaultModel && models.includes(defaultModel) ? defaultModel : models[0]
     setSelectedModel(initialModel ?? '')
-    setError('')
-    setResult(null)
     setConfig(null)
     setConfigError('')
     setConfigLoading(true)
+    probe.reset()
+    setViewMode('console')
 
     let active = true
     void getChannelMonitorConfig(props.channel.id)
@@ -278,7 +284,7 @@ function ChannelProbeDialogContent(
         if (!loadedConfig) {
           setConfigError(
             t(
-              'No detection configuration is saved. Configure it in Test Channel Connection first.'
+              'No detection configuration is saved. Configure it in Monitoring configuration first.'
             )
           )
         }
@@ -297,32 +303,27 @@ function ChannelProbeDialogContent(
 
     return () => {
       active = false
+      probe.abort()
     }
+    // probe identity is stable across renders; re-running on it would restart
+    // the dialog every time a console line is appended.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [defaultModel, models, props.channel.id, props.open, t])
 
-  const selectModel = useCallback((modelName: string) => {
-    setSelectedModel(modelName)
-    setError('')
-    setResult(null)
-  }, [])
+  const selectModel = useCallback(
+    (modelName: string) => {
+      setSelectedModel(modelName)
+      probe.reset()
+      setViewMode('console')
+    },
+    [probe]
+  )
 
-  const runProbe = useCallback(async () => {
+  const runProbe = useCallback(() => {
     if (!selectedModel || !config) return
-    setLoading(true)
-    setError('')
-    setResult(null)
-    try {
-      setResult(await probeChannelNow(props.channel.id, selectedModel))
-    } catch (requestError: unknown) {
-      setError(
-        requestError instanceof Error
-          ? requestError.message
-          : t('Immediate detection failed')
-      )
-    } finally {
-      setLoading(false)
-    }
-  }, [config, props.channel.id, selectedModel, t])
+    setViewMode('console')
+    void probe.run(props.channel.id, selectedModel)
+  }, [config, probe, props.channel.id, selectedModel])
 
   const failed = configError !== '' || error !== ''
   const hasOutcome = result !== null || error !== ''
@@ -402,9 +403,15 @@ function ChannelProbeDialogContent(
       description={`${props.channel.name} / ${t('The request and response details below are returned only once and are not stored.')}`}
       contentClassName={cn(
         'transition-[max-width]',
-        result ? 'sm:max-w-6xl' : 'sm:max-w-2xl'
+        // Only the raw request/response trace needs the wide layout; the console
+        // reads better in a narrower column.
+        viewMode === 'trace' && result ? 'sm:max-w-6xl' : 'sm:max-w-2xl'
       )}
-      contentHeight={result ? 'min(720px, calc(100vh - 12rem))' : 'auto'}
+      contentHeight={
+        consoleLines.length > 0 || loading
+          ? 'min(720px, calc(100vh - 12rem))'
+          : 'auto'
+      }
       footer={
         <>
           <Button
@@ -531,15 +538,46 @@ function ChannelProbeDialogContent(
           </div>
         </section>
 
-        {result ? (
-          <div className='space-y-4 border-t pt-4'>
-            <div className='border-success/20 bg-success/5 text-success flex items-center gap-2 rounded-lg border px-3 py-2 text-xs'>
-              <CheckCircle2 className='size-4 shrink-0' aria-hidden='true' />
-              {t(
-                'Basic probe records were saved; raw request and response details were not saved.'
-              )}
+        {consoleLines.length > 0 || loading ? (
+          <div className='space-y-3 border-t pt-4'>
+            <div className='flex flex-wrap items-center justify-between gap-2'>
+              <div className='text-sm font-medium'>{t('Live output')}</div>
+              <ToggleGroup
+                value={[viewMode]}
+                onValueChange={(value) => {
+                  const next = value[0]
+                  if (next === 'console' || next === 'trace') setViewMode(next)
+                }}
+                variant='outline'
+                size='sm'
+                aria-label={t('Live output')}
+              >
+                <ToggleGroupItem value='console'>
+                  <Terminal data-icon='inline-start' aria-hidden='true' />
+                  {t('Console')}
+                </ToggleGroupItem>
+                <ToggleGroupItem value='trace' disabled={result === null}>
+                  <SquareCode data-icon='inline-start' aria-hidden='true' />
+                  {t('Request details')}
+                </ToggleGroupItem>
+              </ToggleGroup>
             </div>
-            <ProbeResultDetails result={result} />
+
+            {viewMode === 'console' ? (
+              <ProbeConsole lines={consoleLines} running={loading} />
+            ) : null}
+
+            {viewMode === 'trace' && result ? (
+              <div className='space-y-4'>
+                <div className='border-success/20 bg-success/5 text-success flex items-center gap-2 rounded-lg border px-3 py-2 text-xs'>
+                  <CheckCircle2 className='size-4 shrink-0' aria-hidden='true' />
+                  {t(
+                    'Basic probe records were saved; raw request and response details were not saved.'
+                  )}
+                </div>
+                <ProbeResultDetails result={result} />
+              </div>
+            ) : null}
           </div>
         ) : null}
       </div>

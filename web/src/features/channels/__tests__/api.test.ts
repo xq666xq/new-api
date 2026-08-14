@@ -78,6 +78,12 @@ describe('channel monitor API wire conversion', () => {
       const saved = await saveChannelMonitorConfig({
         id: 0,
         channelId: 12,
+        enabled: true,
+        managed: true,
+        monitorMode: 'banned_only',
+        intervalSeconds: 600,
+        jitterSeconds: 60,
+        monitoredModels: ['gpt-test'],
         endpointType: 'openai-response',
         stream: true,
         templateId: 3,
@@ -91,6 +97,12 @@ describe('channel monitor API wire conversion', () => {
       assert.deepEqual(calls[0]?.[1], {
         id: 0,
         channel_id: 12,
+        enabled: true,
+        managed: true,
+        monitor_mode: 'banned_only',
+        interval_seconds: 600,
+        jitter_seconds: 60,
+        monitored_models: ['gpt-test'],
         endpoint_type: 'openai-response',
         stream: true,
         template_id: 3,
@@ -99,6 +111,12 @@ describe('channel monitor API wire conversion', () => {
         body_json: '{"max_output_tokens":32}',
       })
       assert.equal(saved.channelId, 12)
+      assert.equal(saved.enabled, true)
+      assert.equal(saved.managed, true)
+      assert.equal(saved.monitorMode, 'banned_only')
+      assert.equal(saved.intervalSeconds, 600)
+      assert.equal(saved.jitterSeconds, 60)
+      assert.deepEqual(saved.monitoredModels, ['gpt-test'])
       assert.equal(saved.headers[0]?.value, 'draft')
     } finally {
       api.put = originalPut

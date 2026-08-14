@@ -80,7 +80,9 @@ export function ManagedPolicyDialog({
       draft.dingtalkEnabled &&
       !draft.dingtalkWebhookUrl.trim().startsWith('https://')
     ) {
-      toast.error(t('Enter a valid DingTalk webhook URL (must start with https://)'))
+      toast.error(
+        t('Enter a valid DingTalk webhook URL (must start with https://)')
+      )
       return
     }
     await onSave({
@@ -208,6 +210,9 @@ export function ManagedPolicyDialog({
                   {t(
                     'For managed channels, a forwarding error no longer disables the whole channel. After {{count}} consecutive errors within the window for the same model, the next monitor probe is advanced and the ban/recover decision is left to the policy. A single success resets the streak.',
                     { count: draft.errorProbeThreshold }
+                  )}{' '}
+                  {t(
+                    'Error-triggered probes remain active for managed channels even when channel monitoring is turned off.'
                   )}
                 </p>
               </div>
@@ -320,15 +325,11 @@ export function ManagedPolicyDialog({
                     }
                   />
                   <p className='text-muted-foreground text-xs'>
-                    {t(
-                      'How many recent TTFT samples to average.'
-                    )}
+                    {t('How many recent TTFT samples to average.')}
                   </p>
                 </div>
                 <div className='grid gap-2'>
-                  <Label htmlFor='policy-tier-gap'>
-                    {t('Tier gap (%)')}
-                  </Label>
+                  <Label htmlFor='policy-tier-gap'>{t('Tier gap (%)')}</Label>
                   <Input
                     id='policy-tier-gap'
                     type='number'

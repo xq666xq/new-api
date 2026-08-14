@@ -71,14 +71,9 @@ func newBanStageTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-// TestApplyBanForPairRecoversManuallyDisabledManagedChannel proves the fix for
-// the channel-level recovery gap: when a managed channel is disabled at the
-// channel level (manual status 2), sustained successful probes for one of its
-// models must drive the confirmation state machine to a recovery that flips the
-// channel status back to enabled — and the recovery must not resurrect another
-// model on the same channel that the policy still bans (UpdateChannelStatus
-// re-enables every ability, so ReplayManagedAbilities must re-apply the ban).
-func TestApplyBanForPairRecoversManuallyDisabledManagedChannel(t *testing.T) {
+// TestApplyBanForPairDoesNotRecoverMultiModelChannel verifies that one model's
+// managed health never changes a multi-model channel's status.
+func TestApplyBanForPairDoesNotRecoverMultiModelChannel(t *testing.T) {
 	db := newBanStageTestDB(t)
 
 	const channelID = 42
@@ -95,10 +90,10 @@ func TestApplyBanForPairRecoversManuallyDisabledManagedChannel(t *testing.T) {
 		{Group: "default", Model: "model-b", ChannelId: channelID, Enabled: false, Priority: ptrInt64(0)},
 	}).Error)
 
-	// model-a is policy-active (it should recover), model-b is policy-banned (it
-	// must stay disabled through the channel recovery).
+	// Both models are policy-banned. A successful probe recovers model-a only and
+	// must not recover the whole channel.
 	require.NoError(t, model.UpsertChannelManagedState(&model.ChannelManagedState{
-		ChannelId: channelID, ModelName: "model-a", BanState: model.ManagedBanStateActive,
+		ChannelId: channelID, ModelName: "model-a", BanState: model.ManagedBanStateBanned,
 	}))
 	require.NoError(t, model.UpsertChannelManagedState(&model.ChannelManagedState{
 		ChannelId: channelID, ModelName: "model-b", BanState: model.ManagedBanStateBanned,
@@ -117,15 +112,15 @@ func TestApplyBanForPairRecoversManuallyDisabledManagedChannel(t *testing.T) {
 	pair := managedModelPair{channelID: channelID, channelNm: "hosted-a", model: "model-a"}
 
 	event := applyBanForPair(pair, setting)
-	require.NotNil(t, event, "successful probe on a disabled managed channel must trigger recovery")
+	require.NotNil(t, event)
 	assert.Equal(t, "recovered", event.action)
 
-	// Channel is re-enabled: the selection path routes on channel status.
+	// The multi-model channel remains manually disabled.
 	var channel model.Channel
 	require.NoError(t, db.First(&channel, channelID).Error)
-	assert.Equal(t, common.ChannelStatusEnabled, channel.Status)
+	assert.Equal(t, common.ChannelStatusManuallyDisabled, channel.Status)
 
-	// model-a's managed state recovered to active.
+	// model-a recovers, while model-b remains banned.
 	stateA, err := model.GetChannelManagedState(channelID, "model-a")
 	require.NoError(t, err)
 	require.NotNil(t, stateA)
@@ -136,8 +131,82 @@ func TestApplyBanForPairRecoversManuallyDisabledManagedChannel(t *testing.T) {
 	var abilityA, abilityB model.Ability
 	require.NoError(t, db.Where("channel_id = ? AND model = ?", channelID, "model-a").First(&abilityA).Error)
 	require.NoError(t, db.Where("channel_id = ? AND model = ?", channelID, "model-b").First(&abilityB).Error)
-	assert.True(t, abilityA.Enabled, "recovered model must be enabled")
-	assert.False(t, abilityB.Enabled, "still-banned model must stay disabled after channel recovery")
+	assert.True(t, abilityA.Enabled)
+	assert.False(t, abilityB.Enabled)
+}
+
+func TestApplyBanForPairSyncsSingleModelChannelStatus(t *testing.T) {
+	db := newBanStageTestDB(t)
+
+	const channelID = 44
+	require.NoError(t, db.Create(&model.Channel{
+		Id: channelID, Name: "hosted-single", Status: common.ChannelStatusEnabled, Models: "model-a",
+	}).Error)
+	require.NoError(t, db.Create(&model.Ability{
+		Group: "default", Model: "model-a", ChannelId: channelID, Enabled: true, Priority: ptrInt64(0),
+	}).Error)
+	require.NoError(t, db.Create(&model.ChannelMonitorResult{
+		ChannelId: channelID, ModelName: "model-a", Success: false, CheckedAt: 1000,
+	}).Error)
+
+	setting := &operation_setting.ManagedPolicySetting{BanEnabled: true, ConfirmCount: 1}
+	pair := managedModelPair{channelID: channelID, channelNm: "hosted-single", model: "model-a"}
+
+	banEvent := applyBanForPair(pair, setting)
+	require.NotNil(t, banEvent)
+	assert.Equal(t, "banned", banEvent.action)
+
+	var channel model.Channel
+	require.NoError(t, db.First(&channel, channelID).Error)
+	assert.Equal(t, common.ChannelStatusAutoDisabled, channel.Status)
+	var ability model.Ability
+	require.NoError(t, db.Where("channel_id = ? AND model = ?", channelID, "model-a").First(&ability).Error)
+	assert.False(t, ability.Enabled)
+
+	require.NoError(t, db.Create(&model.ChannelMonitorResult{
+		ChannelId: channelID, ModelName: "model-a", Success: true, CheckedAt: 1020,
+	}).Error)
+	recoverEvent := applyBanForPair(pair, setting)
+	require.NotNil(t, recoverEvent)
+	assert.Equal(t, "recovered", recoverEvent.action)
+
+	channel = model.Channel{}
+	require.NoError(t, db.First(&channel, channelID).Error)
+	assert.Equal(t, common.ChannelStatusEnabled, channel.Status)
+	ability = model.Ability{}
+	require.NoError(t, db.Where("channel_id = ? AND model = ?", channelID, "model-a").First(&ability).Error)
+	assert.True(t, ability.Enabled)
+}
+
+func TestApplyBanForPairKeepsMultiModelChannelEnabled(t *testing.T) {
+	db := newBanStageTestDB(t)
+
+	const channelID = 45
+	require.NoError(t, db.Create(&model.Channel{
+		Id: channelID, Name: "hosted-multi", Status: common.ChannelStatusEnabled, Models: "model-a,model-b",
+	}).Error)
+	require.NoError(t, db.Create(&[]model.Ability{
+		{Group: "default", Model: "model-a", ChannelId: channelID, Enabled: true, Priority: ptrInt64(0)},
+		{Group: "default", Model: "model-b", ChannelId: channelID, Enabled: true, Priority: ptrInt64(0)},
+	}).Error)
+	require.NoError(t, db.Create(&model.ChannelMonitorResult{
+		ChannelId: channelID, ModelName: "model-a", Success: false, CheckedAt: 1000,
+	}).Error)
+
+	setting := &operation_setting.ManagedPolicySetting{BanEnabled: true, ConfirmCount: 1}
+	pair := managedModelPair{channelID: channelID, channelNm: "hosted-multi", model: "model-a"}
+	event := applyBanForPair(pair, setting)
+	require.NotNil(t, event)
+	assert.Equal(t, "banned", event.action)
+
+	var channel model.Channel
+	require.NoError(t, db.First(&channel, channelID).Error)
+	assert.Equal(t, common.ChannelStatusEnabled, channel.Status)
+	var abilityA, abilityB model.Ability
+	require.NoError(t, db.Where("channel_id = ? AND model = ?", channelID, "model-a").First(&abilityA).Error)
+	require.NoError(t, db.Where("channel_id = ? AND model = ?", channelID, "model-b").First(&abilityB).Error)
+	assert.False(t, abilityA.Enabled)
+	assert.True(t, abilityB.Enabled)
 }
 
 // TestApplyBanForPairKeepsEnabledChannelPerModelSemantics guards the no-op case:

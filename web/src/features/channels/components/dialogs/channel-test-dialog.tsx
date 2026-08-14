@@ -61,15 +61,6 @@ import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import {
   Sheet,
   SheetContent,
@@ -78,7 +69,6 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
-import { Switch } from '@/components/ui/switch'
 import {
   Tooltip,
   TooltipContent,
@@ -99,7 +89,11 @@ import type {
   SearchChannelsResponse,
 } from '../../types'
 import { useChannels } from '../channels-provider'
-import { DetectionConfigPanel } from './detection-config-panel'
+import {
+  DetectionConfigPanel,
+  STREAM_INCOMPATIBLE_ENDPOINTS,
+} from './detection-config-panel'
+import { ModelMonitoringSwitch } from './model-monitoring-switch'
 
 type ChannelTestDialogProps = {
   open: boolean
@@ -178,38 +172,6 @@ function getLatestChannelTestCachePatch(
 
   return latest?.patch
 }
-
-const endpointTypeOptions: Array<{ value: string; label: string }> = [
-  { value: 'auto', label: 'Auto detect (default)' },
-  { value: 'openai', label: 'OpenAI (/v1/chat/completions)' },
-  { value: 'openai-response', label: 'OpenAI Responses (/v1/responses)' },
-  {
-    value: 'openai-response-compact',
-    label: 'OpenAI Response Compaction (/v1/responses/compact)',
-  },
-  { value: 'anthropic', label: 'Anthropic (/v1/messages)' },
-  {
-    value: 'gemini',
-    label: 'Gemini (/v1beta/models/{model}:generateContent)',
-  },
-  { value: 'jina-rerank', label: 'Jina Rerank (/v1/rerank)' },
-  {
-    value: 'image-generation',
-    label: 'Image Generation (/v1/images/generations)',
-  },
-  { value: 'embeddings', label: 'Embeddings (/v1/embeddings)' },
-]
-
-const endpointSelectContentClass = 'w-[460px] max-w-[calc(100vw-2rem)]'
-const endpointSelectItemClass =
-  'items-start py-2 [&_[data-slot=select-item-text]]:min-w-0 [&_[data-slot=select-item-text]]:shrink [&_[data-slot=select-item-text]]:whitespace-normal'
-
-const STREAM_INCOMPATIBLE_ENDPOINTS = new Set([
-  'embeddings',
-  'image-generation',
-  'jina-rerank',
-  'openai-response-compact',
-])
 
 const MODEL_PRICE_ERROR_CODE = 'model_price_error'
 const FAILURE_SUMMARY_MAX_LENGTH = 96
@@ -290,6 +252,8 @@ function getTestTableColumnClass(columnId: string) {
       return 'w-10 min-w-10'
     case 'model':
       return 'w-auto min-w-48 whitespace-nowrap'
+    case 'monitoring':
+      return 'w-28 min-w-28 text-center whitespace-nowrap'
     case 'status':
       return 'w-28 min-w-28 whitespace-nowrap'
     case 'result':
@@ -335,6 +299,9 @@ function ChannelTestDialogContent({
   > | null>(null)
   const [endpointType, setEndpointType] = useState('auto')
   const [isStreamTest, setIsStreamTest] = useState(false)
+  const [monitoringEnabled, setMonitoringEnabled] = useState(false)
+  const [managed, setManaged] = useState(false)
+  const [monitoredModels, setMonitoredModels] = useState<string[]>([])
   const [searchTerm, setSearchTerm] = useState('')
   const [testResults, setTestResults] = useState<Record<string, TestResult>>({})
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({})
@@ -356,15 +323,6 @@ function ChannelTestDialogContent({
     pageIndex: 0,
     pageSize: 30,
   })
-  const endpointSelectItems = useMemo(
-    () =>
-      endpointTypeOptions.map((option) => ({
-        value: option.value,
-        label: t(option.label),
-      })),
-    [t]
-  )
-
   const dismissBatchProgressToast = useCallback(() => {
     if (batchProgressToastIdRef.current === null) return
 
@@ -402,6 +360,9 @@ function ChannelTestDialogContent({
     batchStopRequestedRef.current = true
     setEndpointType('auto')
     setIsStreamTest(false)
+    setMonitoringEnabled(false)
+    setManaged(false)
+    setMonitoredModels([])
     setSearchTerm('')
     setTestResults({})
     setRowSelection({})
@@ -453,6 +414,14 @@ function ChannelTestDialogContent({
     () => baseModels.filter((model) => !removedModels.has(model)),
     [baseModels, removedModels]
   )
+
+  const toggleModelMonitoring = useCallback((model: string) => {
+    setMonitoredModels((current) =>
+      current.includes(model)
+        ? current.filter((item) => item !== model)
+        : [...current, model]
+    )
+  }, [])
 
   const successModels = useMemo(
     () => models.filter((model) => testResults[model]?.status === 'success'),
@@ -563,6 +532,9 @@ function ChannelTestDialogContent({
             testModel: model,
             endpointType: endpointType === 'auto' ? undefined : endpointType,
             stream: effectiveStreamTest || undefined,
+            // Reuse the saved detection config so a manual test sends the same
+            // template headers/body as a scheduled probe.
+            useMonitorConfig: true,
             silent,
           },
           (success, responseTime, error, errorCode) => {
@@ -798,6 +770,9 @@ function ChannelTestDialogContent({
           for (const model of failed) delete next[model]
           return next
         })
+        setMonitoredModels((current) =>
+          current.filter((model) => !failedSet.has(model))
+        )
         toast.success(
           t('Deleted {{count}} failed models', { count: failed.length })
         )
@@ -889,6 +864,24 @@ function ChannelTestDialogContent({
         },
       },
       {
+        id: 'monitoring',
+        header: t('Monitored models'),
+        cell: ({ row }) => {
+          const model = row.original.model
+          return (
+            <div className='flex justify-center'>
+              <ModelMonitoringSwitch
+                model={model}
+                checked={monitoredModels.includes(model)}
+                onCheckedChange={() => toggleModelMonitoring(model)}
+              />
+            </div>
+          )
+        },
+        enableSorting: false,
+        size: 112,
+      },
+      {
         id: 'status',
         header: t('Status'),
         cell: ({ row }) => {
@@ -952,10 +945,12 @@ function ChannelTestDialogContent({
     [
       defaultTestModel,
       isBatchTesting,
+      monitoredModels,
       t,
       testResults,
       testingModels,
       testSingleModel,
+      toggleModelMonitoring,
     ]
   )
 
@@ -980,7 +975,7 @@ function ChannelTestDialogContent({
         onOpenChange={handleDialogOpenChange}
         title={
           <span className='inline-flex max-w-full min-w-0 items-center gap-1.5'>
-            <span className='shrink-0'>{t('Test Channel Connection')}:</span>
+            <span className='shrink-0'>{t('Monitoring configuration')}:</span>
             <span className='min-w-0 truncate'>{currentRow.name}</span>
           </span>
         }
@@ -994,69 +989,17 @@ function ChannelTestDialogContent({
         }
       >
         <div className='max-h-[78vh] space-y-4 overflow-y-auto py-4 pr-1'>
-          <div className='grid gap-4 md:grid-cols-2'>
-            <div className='grid gap-2'>
-              <Label htmlFor='endpoint-type'>{t('Endpoint Type')}</Label>
-              <Select
-                items={endpointSelectItems}
-                value={endpointType}
-                onValueChange={handleEndpointTypeChange}
-              >
-                <SelectTrigger id='endpoint-type' className='w-full min-w-0'>
-                  <SelectValue
-                    className='min-w-0 truncate'
-                    placeholder={t('Auto detect (default)')}
-                  />
-                </SelectTrigger>
-                <SelectContent
-                  alignItemWithTrigger={false}
-                  className={endpointSelectContentClass}
-                >
-                  <SelectGroup>
-                    {endpointSelectItems.map((option) => (
-                      <SelectItem
-                        key={option.value}
-                        value={option.value}
-                        className={endpointSelectItemClass}
-                      >
-                        <span className='min-w-0 leading-snug break-words whitespace-normal'>
-                          {option.label}
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-              <p className='text-muted-foreground text-xs'>
-                {t(
-                  'Override the endpoint used for testing. Leave empty to auto detect.'
-                )}
-              </p>
-            </div>
-            <div className='grid gap-2'>
-              <Label htmlFor='stream-toggle'>{t('Stream Mode')}</Label>
-              <div className='flex items-center gap-2'>
-                <Switch
-                  id='stream-toggle'
-                  checked={effectiveStreamTest}
-                  onCheckedChange={setIsStreamTest}
-                  disabled={streamDisabled}
-                />
-                <span className='text-sm'>
-                  {effectiveStreamTest ? t('Enabled') : t('Disabled')}
-                </span>
-              </div>
-              <p className='text-muted-foreground text-xs'>
-                {t('Enable streaming mode for the test request.')}
-              </p>
-            </div>
-          </div>
-
           <DetectionConfigPanel
             open={open}
             channelId={currentRow.id}
+            monitoringEnabled={monitoringEnabled}
+            managed={managed}
+            monitoredModels={monitoredModels}
             endpointType={endpointType}
             stream={effectiveStreamTest}
+            onMonitoringEnabledChange={setMonitoringEnabled}
+            onManagedChange={setManaged}
+            onMonitoredModelsChange={setMonitoredModels}
             onEndpointTypeChange={handleEndpointTypeChange}
             onStreamChange={setIsStreamTest}
           />
@@ -1067,6 +1010,11 @@ function ChannelTestDialogContent({
                 <p className='text-sm font-medium'>{t('Channel models')}</p>
                 <p className='text-muted-foreground text-xs'>
                   {t('Select models to run batch tests.')}
+                </p>
+                <p className='text-muted-foreground text-xs'>
+                  {t(
+                    'Tests use the saved detection config, so save it first to try out template changes.'
+                  )}
                 </p>
                 <div className='flex flex-wrap items-center gap-2'>
                   {isBatchTesting ? (
@@ -1148,6 +1096,7 @@ function ChannelTestDialogContent({
                   <colgroup>
                     <col className='w-10 min-w-10' />
                     <col className='w-auto' />
+                    <col className='w-28' />
                     <col className='w-28' />
                     <col className='w-80' />
                     <col className='w-px' />

@@ -38,6 +38,11 @@ func (channelMonitorHandler) Type() string { return model.SystemTaskTypeChannelM
 // This keeps row creation at roughly the actual probe cadence instead of one row
 // every tick, which matters because system_tasks has no retention cleanup.
 func (channelMonitorHandler) Enabled() bool {
+	// Error-triggered probes belong to the managed policy and remain runnable
+	// when periodic monitoring or curfew has paused normal sweeps.
+	if model.HasPendingManagedErrorProbeConfigs() {
+		return true
+	}
 	if !operation_setting.IsChannelMonitorEnabled() {
 		return false
 	}
@@ -250,23 +255,66 @@ func nextChannelMonitorCheckAt(
 	return nextCheckAt
 }
 
+// channelMonitorModelsForSweep selects the monitored models that should be
+// probed in this scheduler cycle. Banned-only mode keeps recovery checks and an
+// in-progress ban confirmation moving, while active stable models stay idle.
+// An explicit error-triggered one-shot remains a full check so the managed
+// policy can decide whether an active model should be banned.
+func channelMonitorModelsForSweep(
+	config *model.ChannelMonitorConfig,
+	states map[string]*model.ChannelManagedState,
+) []string {
+	if config == nil {
+		return []string{}
+	}
+	models := config.GetMonitoredModels()
+	if config.MonitorMode != model.ChannelMonitorModeBannedOnly || config.HasPendingManagedErrorProbe() {
+		return models
+	}
+
+	selected := make([]string, 0, len(models))
+	for _, modelName := range models {
+		state := states[modelName]
+		if state == nil {
+			continue
+		}
+		if state.BanState == model.ManagedBanStateBanned || state.ConfirmCount > 0 {
+			selected = append(selected, modelName)
+		}
+	}
+	return selected
+}
+
 func runChannelMonitorTask(ctx context.Context) (channelMonitorTaskResult, error) {
 	summary := channelMonitorTaskResult{}
-	if !operation_setting.IsChannelMonitorEnabled() {
-		return summary, nil
-	}
-	// Curfew pauses all probing. Checked here too (not just in Enabled) because a
-	// task row may already have been leased when the quiet window began.
-	if operation_setting.IsChannelMonitorCurfewActive(time.Now()) {
+	regularProbesEnabled := operation_setting.IsChannelMonitorEnabled() &&
+		!operation_setting.IsChannelMonitorCurfewActive(time.Now())
+	if !regularProbesEnabled && !model.HasPendingManagedErrorProbeConfigs() {
 		return summary, nil
 	}
 	now := common.GetTimestamp()
 	if err := model.DeleteOldChannelMonitorResults(now - 30*24*60*60); err != nil {
 		return summary, err
 	}
-	configs, err := model.GetDueChannelMonitorConfigs(now)
+	configs, err := model.GetPendingManagedErrorProbeConfigs()
 	if err != nil {
 		return summary, err
+	}
+	if regularProbesEnabled {
+		dueConfigs, dueErr := model.GetDueChannelMonitorConfigs(now)
+		if dueErr != nil {
+			return summary, dueErr
+		}
+		pendingChannels := make(map[int]struct{}, len(configs))
+		for _, config := range configs {
+			pendingChannels[config.ChannelId] = struct{}{}
+		}
+		for _, config := range dueConfigs {
+			if _, pending := pendingChannels[config.ChannelId]; pending {
+				continue
+			}
+			configs = append(configs, config)
+		}
 	}
 	if len(configs) == 0 {
 		return summary, nil
@@ -282,13 +330,17 @@ func runChannelMonitorTask(ctx context.Context) (channelMonitorTaskResult, error
 	finishedAtByChannel := make(map[int]int64, len(configs))
 	jobs := make([]channelMonitorProbeJob, 0)
 	for _, config := range configs {
-		if !operation_setting.IsChannelMonitorEnabled() {
-			return summary, nil
-		}
 		if err := ctx.Err(); err != nil {
 			return summary, err
 		}
-		models := config.GetMonitoredModels()
+		var managedStates map[string]*model.ChannelManagedState
+		if config.MonitorMode == model.ChannelMonitorModeBannedOnly && !config.HasPendingManagedErrorProbe() {
+			managedStates, err = model.GetChannelManagedStatesByChannel(config.ChannelId)
+			if err != nil {
+				return summary, err
+			}
+		}
+		models := channelMonitorModelsForSweep(config, managedStates)
 		if len(models) == 0 {
 			// 没有勾选任何模型：稍后仍会推进 next_check_at，避免该配置
 			// 永远到期、每趟被反复选中。

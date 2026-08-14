@@ -66,6 +66,7 @@ const { channelSchema } = await import('../../types')
 const { ChannelsProvider, useChannels } = await import('../channels-provider')
 const { DataTableRowActions } = await import('../data-table-row-actions')
 const { ChannelProbeDialog } = await import('../dialogs/channel-probe-dialog')
+const { useAuthStore } = await import('@/stores/auth-store')
 
 const i18n = createInstance()
 await i18n.use(initReactI18next).init({
@@ -91,9 +92,51 @@ type MockableApi = {
 const apiClient = api as unknown as MockableApi
 const originalGet = apiClient.get
 const originalPost = apiClient.post
+const originalFetch = globalThis.fetch
 let probePayload: Record<string, unknown> | null = null
 
+const probeResultEvent = {
+  model_name: 'gpt-backup',
+  endpoint_type: 'anthropic',
+  stream: true,
+  question_id: 7,
+  question_content: 'Reply with a short confirmation.',
+  success: true,
+  latency_ms: 1250,
+  ttft_ms: 245,
+  status_code: 200,
+  error_message: '',
+  checked_at: 100,
+  trace: {
+    request_method: 'POST',
+    request_url: 'https://upstream.example/v1/messages',
+    request_headers: { Accept: ['application/json'] },
+    request_body: '{"model":"gpt-backup"}',
+    request_body_truncated: false,
+    request_write_error: '',
+    response_url: 'https://upstream.example/v1/messages',
+    response_status_code: 200,
+    response_status: '200 OK',
+    response_headers: { 'Content-Type': ['application/json'] },
+    response_body: '{"ok":true}',
+    response_body_truncated: false,
+    body_limit_bytes: 1048576,
+  },
+}
+
+// The probe dialog consumes Server-Sent Events over fetch, so the fixture has to
+// be a real streaming body: each frame is delivered as its own chunk so the test
+// exercises the incremental decoder rather than one buffered parse.
 function installApiFixtures(): void {
+  // The streaming probe attaches auth headers itself instead of going through the
+  // axios instance, so the store needs a live token or it would try to refresh.
+  useAuthStore.getState().auth.setBundle({
+    access_token: 'probe-test-token',
+    access_expires_at: Math.floor(Date.now() / 1000) + 3600,
+    user: null,
+    session: null,
+  } as never)
+
   apiClient.get = async (url) => {
     assert.equal(url, '/api/channel_monitor/config/12')
     return {
@@ -113,46 +156,38 @@ function installApiFixtures(): void {
       },
     }
   }
-  apiClient.post = async (url, data) => {
-    assert.equal(url, '/api/channel_monitor/probe')
-    assert.ok(data && typeof data === 'object')
-    probePayload = data as Record<string, unknown>
-    return {
-      data: {
-        success: true,
-        data: [
-          {
-            model_name: 'gpt-backup',
-            endpoint_type: 'anthropic',
-            stream: true,
-            question_id: 7,
-            question_content: 'Reply with a short confirmation.',
-            success: true,
-            latency_ms: 1250,
-            ttft_ms: 245,
-            status_code: 200,
-            error_message: '',
-            checked_at: 100,
-            trace: {
-              request_method: 'POST',
-              request_url: 'https://upstream.example/v1/messages',
-              request_headers: { Accept: ['application/json'] },
-              request_body: '{"model":"gpt-backup"}',
-              request_body_truncated: false,
-              request_write_error: '',
-              response_url: 'https://upstream.example/v1/messages',
-              response_status_code: 200,
-              response_status: '200 OK',
-              response_headers: { 'Content-Type': ['application/json'] },
-              response_body: '{"ok":true}',
-              response_body_truncated: false,
-              body_limit_bytes: 1048576,
-            },
-          },
-        ],
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    assert.equal(url, '/api/channel_monitor/probe_stream')
+    probePayload = JSON.parse(String(init?.body))
+
+    const frames = [
+      `event: start\ndata: ${JSON.stringify({
+        model_name: 'gpt-backup',
+        endpoint_type: 'anthropic',
+        stream: true,
+        question_id: 7,
+        question_content: 'Reply with a short confirmation.',
+        channel_name: 'Primary OpenAI',
+        channel_type: 1,
+      })}\n\n`,
+      `event: chunk\ndata: ${JSON.stringify({
+        model_name: 'gpt-backup',
+        delta: 'data: {"choices":[{"delta":{"content":"Confirmed"}}]}\n\n',
+      })}\n\n`,
+      `event: result\ndata: ${JSON.stringify(probeResultEvent)}\n\n`,
+      'event: end\ndata: {}\n\n',
+    ]
+
+    const encoder = new TextEncoder()
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const frame of frames) controller.enqueue(encoder.encode(frame))
+        controller.close()
       },
-    }
-  }
+    })
+    return { ok: true, status: 200, body } as unknown as Response
+  }) as typeof globalThis.fetch
 }
 
 async function waitForCondition(
@@ -214,6 +249,7 @@ describe('channel row detection action', () => {
   after(() => {
     apiClient.get = originalGet
     apiClient.post = originalPost
+    globalThis.fetch = originalFetch
     domWindow.close()
   })
 
@@ -282,24 +318,44 @@ describe('channel row detection action', () => {
     assert.ok(startButton)
     await act(async () => startButton.click())
 
+    // The console view streams first: it must show the decoded assistant text
+    // and the success summary without the user opening anything else.
     await waitForCondition(
       () =>
         probePayload !== null &&
-        dialog.textContent?.includes(
-          'Basic probe records were saved; raw request and response details were not saved.'
-        ) === true &&
-        dialog.textContent?.includes('245 ms') === true,
-      'probe result details were not shown'
+        dialog.textContent?.includes('Confirmed') === true &&
+        dialog.textContent?.includes('Detection succeeded in 1.25 s') === true,
+      'streamed console output was not shown'
     )
     assert.deepEqual(probePayload, {
       channel_id: 12,
       model_name: 'gpt-backup',
     })
     assert.match(dialog.textContent ?? '', /Retry/)
-    assert.match(dialog.textContent ?? '', /245 ms/)
-    assert.match(dialog.textContent ?? '', /1\.25 s/)
     assert.match(dialog.textContent ?? '', /Reply with a short confirmation\./)
+    // Raw SSE framing stays out of the console; only decoded text is printed.
+    assert.doesNotMatch(dialog.textContent ?? '', /"choices"/)
+
+    // Switching to the trace view must still expose the full request/response
+    // detail that existed before streaming was added.
+    const traceToggle = [
+      ...dialog.querySelectorAll<HTMLButtonElement>(
+        '[data-slot="toggle-group-item"]'
+      ),
+    ].find((button) => button.textContent?.includes('Request details'))
+    assert.ok(traceToggle)
+    await act(async () => traceToggle.click())
+
+    await waitForCondition(
+      () => dialog.textContent?.includes('245 ms') === true,
+      'trace details were not shown after switching views'
+    )
+    assert.match(dialog.textContent ?? '', /245 ms/)
     assert.match(dialog.textContent ?? '', /https:\/\/upstream\.example/)
+    assert.match(
+      dialog.textContent ?? '',
+      /Basic probe records were saved; raw request and response details were not saved\./
+    )
 
     await act(async () => root.unmount())
     queryClient.clear()
