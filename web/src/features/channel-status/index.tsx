@@ -68,6 +68,64 @@ const RANGE_OPTIONS: StatusRange[] = ['1h', '6h', '12h', '24h', '7d']
 /** Sentinel select value for "all tags" (empty string is not a valid item value). */
 const ALL_TAGS = '__all__'
 
+/** Sentinel for the unsorted view: rows keep the order the backend returned. */
+const NO_SORT = '__unsorted__'
+
+/**
+ * Sort choices for the status list. `field` selects the comparison key and
+ * `dir` its direction; the unsorted entry omits both. `adminOnly` marks the ones
+ * whose key only carries data in the admin (channel) view — the aggregated
+ * member view leaves modelPriority at its default, so offering a priority sort
+ * there would silently do nothing.
+ */
+const SORT_OPTIONS: readonly {
+  value: string
+  label: string
+  field?: 'successRate' | 'modelPriority'
+  dir?: 1 | -1
+  adminOnly: boolean
+}[] = [
+  { value: NO_SORT, label: 'Default order', adminOnly: false },
+  {
+    value: 'success-rate-asc',
+    label: 'Success Rate: Low to High',
+    field: 'successRate',
+    dir: 1,
+    adminOnly: false,
+  },
+  {
+    value: 'success-rate-desc',
+    label: 'Success Rate: High to Low',
+    field: 'successRate',
+    dir: -1,
+    adminOnly: false,
+  },
+  {
+    value: 'priority-asc',
+    label: 'Priority: Low to High',
+    field: 'modelPriority',
+    dir: 1,
+    adminOnly: true,
+  },
+  {
+    value: 'priority-desc',
+    label: 'Priority: High to Low',
+    field: 'modelPriority',
+    dir: -1,
+    adminOnly: true,
+  },
+]
+
+/** Sentinel for the unfiltered routing-status view. */
+const ALL_STATUS = '__all_status__'
+
+/** Routing-status filter choices, matching the Enabled/Disabled chip on a card. */
+const STATUS_OPTIONS = [
+  { value: ALL_STATUS, label: 'All Status' },
+  { value: 'enabled', label: 'Enabled' },
+  { value: 'disabled', label: 'Disabled' },
+] as const
+
 /**
  * Debounced text filter input that stays responsive while typing and is
  * IME-safe. The visible value updates on every keystroke, but the debounced
@@ -731,6 +789,8 @@ export function ChannelStatus() {
   const [channelQuery, setChannelQuery] = useState('')
   const [modelQuery, setModelQuery] = useState('')
   const [tag, setTag] = useState<string>(ALL_TAGS)
+  const [sort, setSort] = useState<string>(NO_SORT)
+  const [status, setStatus] = useState<string>(ALL_STATUS)
   // Admins see per-channel rows with channel identity; normal members see the
   // same data aggregated by model with channel identity stripped. isAdmin gates
   // both the data source (getChannelStatus vs getModelStatus) and every piece of
@@ -759,14 +819,17 @@ export function ChannelStatus() {
   }, [rows])
 
   // Client-side filtering: channel/model are case-insensitive substring matches,
-  // tag is an exact match. Filtering here (not on the server) keeps every range
-  // switch a single query and makes typing feel instant.
+  // tag and routing status are exact matches. Filtering here (not on the server)
+  // keeps every range switch a single query and makes typing feel instant.
+  // Sorting is applied after filtering, on a copy so the query cache stays
+  // untouched; Array.sort is stable, so equal keys keep the backend's order.
   const filteredRows = useMemo(() => {
     const channelNeedle = channelQuery.trim().toLowerCase()
     const modelNeedle = modelQuery.trim().toLowerCase()
-    return rows.filter((row) => {
-      // Channel name / tag filters only apply to the admin (channel) view; the
-      // member view carries no channel identity so those needles are always empty.
+    const rowsToShow = rows.filter((row) => {
+      // Channel name / tag / status filters only apply to the admin (channel)
+      // view; the member view carries no channel identity so those needles are
+      // always empty and the status select is not rendered.
       if (channelNeedle && !row.name.toLowerCase().includes(channelNeedle)) {
         return false
       }
@@ -776,12 +839,25 @@ export function ChannelStatus() {
       if (tag !== ALL_TAGS && row.tag !== tag) {
         return false
       }
+      if (status !== ALL_STATUS && row.modelEnabled !== (status === 'enabled')) {
+        return false
+      }
       return true
     })
-  }, [rows, channelQuery, modelQuery, tag])
+
+    const sortChoice = SORT_OPTIONS.find((option) => option.value === sort)
+    const sortField = sortChoice?.field
+    if (!sortField) return rowsToShow
+    const dir = sortChoice.dir ?? 1
+    return [...rowsToShow].sort((a, b) => (a[sortField] - b[sortField]) * dir)
+  }, [rows, channelQuery, modelQuery, tag, status, sort])
 
   const hasActiveFilters =
-    channelQuery.trim() !== '' || modelQuery.trim() !== '' || tag !== ALL_TAGS
+    channelQuery.trim() !== '' ||
+    modelQuery.trim() !== '' ||
+    tag !== ALL_TAGS ||
+    status !== ALL_STATUS ||
+    sort !== NO_SORT
 
   return (
     <SectionPageLayout>
@@ -861,6 +937,44 @@ export function ChannelStatus() {
                 </SelectContent>
               </Select>
             )}
+            {isAdmin && (
+              <Select value={status} onValueChange={(v) => v && setStatus(v)}>
+                <SelectTrigger className='w-[132px]' aria-label={t('Status')}>
+                  <SelectValue>
+                    {t(
+                      STATUS_OPTIONS.find((option) => option.value === status)
+                        ?.label ?? 'All Status'
+                    )}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent alignItemWithTrigger={false}>
+                  {STATUS_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {t(option.label)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            <Select value={sort} onValueChange={(v) => v && setSort(v)}>
+              <SelectTrigger className='w-[190px]' aria-label={t('Sort')}>
+                <SelectValue>
+                  {t(
+                    SORT_OPTIONS.find((option) => option.value === sort)
+                      ?.label ?? 'Default order'
+                  )}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent alignItemWithTrigger={false}>
+                {SORT_OPTIONS.filter(
+                  (option) => isAdmin || !option.adminOnly
+                ).map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {t(option.label)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             {hasActiveFilters && (
               <Button
                 type='button'
@@ -870,6 +984,8 @@ export function ChannelStatus() {
                   setChannelQuery('')
                   setModelQuery('')
                   setTag(ALL_TAGS)
+                  setStatus(ALL_STATUS)
+                  setSort(NO_SORT)
                 }}
               >
                 {t('Clear filters')}
