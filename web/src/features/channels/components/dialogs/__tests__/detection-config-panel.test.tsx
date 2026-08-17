@@ -53,7 +53,7 @@ for (const key of domGlobals) {
   })
 }
 
-const { act, useState } = await import('react')
+const { act, useRef, useState } = await import('react')
 const { createRoot } = await import('react-dom/client')
 const { QueryClient, QueryClientProvider } =
   await import('@tanstack/react-query')
@@ -62,6 +62,7 @@ const { I18nextProvider, initReactI18next } = await import('react-i18next')
 const { TooltipProvider } = await import('@/components/ui/tooltip')
 const { api } = await import('@/lib/api')
 const { DetectionConfigPanel } = await import('../detection-config-panel')
+type DetectionConfigPanelHandle = import('../detection-config-panel').DetectionConfigPanelHandle
 const { ModelMonitoringSwitch } = await import('../model-monitoring-switch')
 
 const i18n = createInstance()
@@ -163,18 +164,24 @@ async function waitForCondition(
   })
 }
 
+// Mirrors how ChannelTestDialog hosts the panel: the save button lives outside
+// it and triggers the panel through its ref, so the tests drive the same path
+// the dialog footer does.
 function DetectionConfigHarness() {
   const [endpointType, setEndpointType] = useState('auto')
   const [stream, setStream] = useState(false)
   const [monitoringEnabled, setMonitoringEnabled] = useState(false)
   const [managed, setManaged] = useState(false)
   const [monitoredModels, setMonitoredModels] = useState<string[]>([])
+  const [saveBusy, setSaveBusy] = useState(false)
+  const panelRef = useRef<DetectionConfigPanelHandle>(null)
   const [queryClient] = useState(() => new QueryClient())
   return (
     <QueryClientProvider client={queryClient}>
       <I18nextProvider i18n={i18n}>
         <TooltipProvider>
           <DetectionConfigPanel
+            ref={panelRef}
             open
             channelId={12}
             monitoringEnabled={monitoringEnabled}
@@ -187,7 +194,15 @@ function DetectionConfigHarness() {
             onMonitoredModelsChange={setMonitoredModels}
             onEndpointTypeChange={setEndpointType}
             onStreamChange={setStream}
+            onSaveBusyChange={setSaveBusy}
           />
+          <button
+            type='button'
+            disabled={saveBusy}
+            onClick={() => panelRef.current?.save()}
+          >
+            Save detection config
+          </button>
           <output data-testid='endpoint-type'>{endpointType}</output>
           <output data-testid='stream'>{String(stream)}</output>
         </TooltipProvider>
@@ -286,11 +301,9 @@ describe('channel test monitoring configuration', () => {
       host.querySelector<HTMLButtonElement>('#channel-managed')
     assert.ok(monitoringSwitch)
     assert.ok(managedSwitch)
-    await act(async () => {
-      monitoringSwitch.click()
-      managedSwitch.click()
-      findButton('Banned-only probing').click()
-    })
+    // Hosting and banned-only probing are already the defaults for a channel
+    // with no saved config, so only monitoring has to be switched on here.
+    await act(async () => monitoringSwitch.click())
 
     await act(async () => findButton('Save detection config').click())
     await waitForCondition(() => savedPayload !== null, 'config was not saved')
@@ -424,8 +437,8 @@ describe('channel test monitoring configuration', () => {
       id: 0,
       channel_id: 12,
       enabled: false,
-      managed: false,
-      monitor_mode: 'default',
+      managed: true,
+      monitor_mode: 'banned_only',
       interval_seconds: 600,
       jitter_seconds: 60,
       monitored_models: [],

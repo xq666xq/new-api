@@ -26,7 +26,14 @@ import {
   Save,
   Trash2,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useState,
+} from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -122,6 +129,12 @@ const BODY_MODE_OPTIONS: Array<{
 
 const MIN_INTERVAL_SECONDS = 5
 const MAX_INTERVAL_SECONDS = 24 * 60 * 60
+// Defaults for a channel that has no saved monitor config yet. Banned-only
+// probing plus hosting is the intended starting point: the policy engine watches
+// the channel and only spends probes on models it has actually banned.
+// Keep in sync with newDefaultConfig in features/channel-monitor/constants.ts.
+const DEFAULT_MONITOR_MODE: ChannelMonitorMode = 'banned_only'
+const DEFAULT_MANAGED = true
 const DEFAULT_INTERVAL_SECONDS = 600
 const DEFAULT_JITTER_SECONDS = 60
 
@@ -158,6 +171,17 @@ type DetectionConfigPanelProps = {
   onMonitoredModelsChange: (value: string[]) => void
   onEndpointTypeChange: (value: string) => void
   onStreamChange: (value: boolean) => void
+  /**
+   * Reports whether saving is possible right now, so a host that renders the
+   * save button outside the panel (the test dialog puts it in the footer) can
+   * disable it while the config loads or a save is in flight.
+   */
+  onSaveBusyChange?: (busy: boolean) => void
+}
+
+/** Lets the host trigger the panel's save from its own footer button. */
+export type DetectionConfigPanelHandle = {
+  save: () => void
 }
 
 type TemplateNameDialogProps = {
@@ -236,7 +260,10 @@ function TemplateNameDialog(props: TemplateNameDialogProps) {
   )
 }
 
-export function DetectionConfigPanel(props: DetectionConfigPanelProps) {
+export const DetectionConfigPanel = forwardRef<
+  DetectionConfigPanelHandle,
+  DetectionConfigPanelProps
+>(function DetectionConfigPanel(props, ref) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const channelId = props.channelId
@@ -247,7 +274,8 @@ export function DetectionConfigPanel(props: DetectionConfigPanelProps) {
   const applyManaged = props.onManagedChange
   const applyMonitoredModels = props.onMonitoredModelsChange
   const [configId, setConfigId] = useState(0)
-  const [monitorMode, setMonitorMode] = useState<ChannelMonitorMode>('default')
+  const [monitorMode, setMonitorMode] =
+    useState<ChannelMonitorMode>(DEFAULT_MONITOR_MODE)
   const [intervalSeconds, setIntervalSeconds] = useState(
     DEFAULT_INTERVAL_SECONDS
   )
@@ -304,9 +332,9 @@ export function DetectionConfigPanel(props: DetectionConfigPanelProps) {
         setTemplates(loadedTemplates)
         setConfigId(config?.id ?? 0)
         applyMonitoringEnabled(config?.enabled ?? false)
-        applyManaged(config?.managed ?? false)
+        applyManaged(config?.managed ?? DEFAULT_MANAGED)
         applyMonitoredModels(config?.monitoredModels ?? [])
-        setMonitorMode(config?.monitorMode ?? 'default')
+        setMonitorMode(config?.monitorMode ?? DEFAULT_MONITOR_MODE)
         setIntervalSeconds(config?.intervalSeconds ?? DEFAULT_INTERVAL_SECONDS)
         setJitterSeconds(config?.jitterSeconds ?? DEFAULT_JITTER_SECONDS)
         setTemplateId(config?.templateId ?? 0)
@@ -455,6 +483,18 @@ export function DetectionConfigPanel(props: DetectionConfigPanelProps) {
     templateId,
   ])
 
+  // The test dialog renders the save button in its footer, so expose the action
+  // and keep the host informed about whether it should be disabled.
+  useImperativeHandle(ref, () => ({ save: () => void saveConfig() }), [
+    saveConfig,
+  ])
+
+  const saveBusy = loading || saving
+  const reportSaveBusy = props.onSaveBusyChange
+  useEffect(() => {
+    reportSaveBusy?.(saveBusy)
+  }, [reportSaveBusy, saveBusy])
+
   const openTemplateDialog = useCallback((template: MonitorTemplate | null) => {
     setEditingTemplate(template)
     setTemplateDialogOpen(true)
@@ -532,19 +572,7 @@ export function DetectionConfigPanel(props: DetectionConfigPanelProps) {
   return (
     <>
       <section className='space-y-3 border-t pt-4'>
-        <div className='flex flex-wrap items-center justify-between gap-2'>
-          <h3 className='text-sm font-medium'>
-            {t('Detection configuration')}
-          </h3>
-          <Button size='sm' onClick={saveConfig} disabled={loading || saving}>
-            {saving ? (
-              <Loader2 className='size-4 animate-spin' />
-            ) : (
-              <Save className='size-4' />
-            )}
-            {t('Save detection config')}
-          </Button>
-        </div>
+        <h3 className='text-sm font-medium'>{t('Detection configuration')}</h3>
 
         <div className='grid gap-2'>
           <Label htmlFor='monitor-template-select'>
@@ -928,4 +956,4 @@ export function DetectionConfigPanel(props: DetectionConfigPanelProps) {
       />
     </>
   )
-}
+})

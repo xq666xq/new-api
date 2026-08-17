@@ -962,23 +962,37 @@ func GetChannelMonitorConfig(channelId int) (*ChannelMonitorConfig, error) {
 // NextCheckAt 不由前端传入（DTO 中恒为 0），因此新增与编辑都会让 next_check_at
 // 归零、在下个调度节拍立即到期并按新的 interval/jitter 重新排期——这正是“保存即
 // 生效”的语义：改了间隔或抖动后马上按新策略走，无需等上一周期耗尽。
+//
+// 查询走 Unscoped：channel_id 上的唯一索引把软删除行也算在内（PostgreSQL 老部署
+// 留有无谓词的 idx_channel_monitor_configs_channel_id，MySQL 则根本不支持部分
+// 索引），所以历史遗留的软删除行必须复用而不能另插一行，否则撞唯一约束。复用时
+// 视作全新配置：清掉删除标记与上次探测时间，只借用那一行的主键。
 func UpsertChannelMonitorConfig(config *ChannelMonitorConfig) error {
 	now := common.GetTimestamp()
-	existing, err := GetChannelMonitorConfig(config.ChannelId)
-	if err != nil {
-		return err
-	}
-	if existing == nil {
+	var existing ChannelMonitorConfig
+	err := DB.Unscoped().Where("channel_id = ?", config.ChannelId).First(&existing).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		config.Id = 0
 		config.CreatedTime = now
 		config.UpdatedTime = now
 		return DB.Create(config).Error
 	}
+	if err != nil {
+		return err
+	}
 	config.Id = existing.Id
-	config.CreatedTime = existing.CreatedTime
-	config.LastCheckedAt = existing.LastCheckedAt
 	config.UpdatedTime = now
-	return DB.Save(config).Error
+	if existing.DeletedAt.Valid {
+		config.CreatedTime = now
+		config.LastCheckedAt = 0
+		config.DeletedAt = gorm.DeletedAt{}
+	} else {
+		config.CreatedTime = existing.CreatedTime
+		config.LastCheckedAt = existing.LastCheckedAt
+	}
+	// Unscoped again: a scoped UPDATE carries `deleted_at IS NULL` and would match
+	// no row when reviving a tombstone.
+	return DB.Unscoped().Save(config).Error
 }
 
 // DeleteChannelMonitorConfigByChannel removes a channel from the monitor list and
@@ -1001,7 +1015,14 @@ func DeleteChannelMonitorConfigByChannel(channelId int) error {
 	}
 
 	return DB.Transaction(func(tx *gorm.DB) error {
-		result := tx.Where("channel_id = ?", channelId).Delete(&ChannelMonitorConfig{})
+		// Hard delete: channel_id carries a unique index, and a soft-deleted row
+		// keeps occupying it while GORM's default scope hides it from
+		// GetChannelMonitorConfig — so re-configuring the same channel would try to
+		// INSERT and hit the constraint. The predicate on uk_channel_monitor_channel
+		// does not save us either, because MySQL has no partial indexes and drops it.
+		// Nothing reads a removed config (probe history lives in
+		// channel_monitor_results), so there is no reason to keep the tombstone.
+		result := tx.Unscoped().Where("channel_id = ?", channelId).Delete(&ChannelMonitorConfig{})
 		if result.Error != nil {
 			return result.Error
 		}

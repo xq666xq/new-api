@@ -29,6 +29,7 @@ import {
   Gauge,
   Info,
   Loader2,
+  Save,
   Settings,
   Trash2,
 } from 'lucide-react'
@@ -91,6 +92,7 @@ import type {
 import { useChannels } from '../channels-provider'
 import {
   DetectionConfigPanel,
+  type DetectionConfigPanelHandle,
   STREAM_INCOMPATIBLE_ENDPOINTS,
 } from './detection-config-panel'
 import { ModelMonitoringSwitch } from './model-monitoring-switch'
@@ -301,6 +303,10 @@ function ChannelTestDialogContent({
   const [isStreamTest, setIsStreamTest] = useState(false)
   const [monitoringEnabled, setMonitoringEnabled] = useState(false)
   const [managed, setManaged] = useState(false)
+  // The detection panel's save button lives in this dialog's footer, so the
+  // panel hands back its save action and its disabled state.
+  const detectionPanelRef = useRef<DetectionConfigPanelHandle>(null)
+  const [detectionSaveBusy, setDetectionSaveBusy] = useState(false)
   const [monitoredModels, setMonitoredModels] = useState<string[]>([])
   const [searchTerm, setSearchTerm] = useState('')
   const [testResults, setTestResults] = useState<Record<string, TestResult>>({})
@@ -983,13 +989,34 @@ function ChannelTestDialogContent({
         contentHeight='auto'
         bodyClassName='space-y-4'
         footer={
-          <Button variant='outline' onClick={handleClose}>
-            {t('Close')}
-          </Button>
+          <>
+            <Button variant='outline' onClick={handleClose}>
+              {t('Close')}
+            </Button>
+            <Button
+              onClick={() => detectionPanelRef.current?.save()}
+              disabled={detectionSaveBusy}
+            >
+              {detectionSaveBusy ? (
+                <Loader2
+                  data-icon='inline-start'
+                  className='animate-spin'
+                  aria-hidden='true'
+                />
+              ) : (
+                <Save data-icon='inline-start' aria-hidden='true' />
+              )}
+              {t('Save detection config')}
+            </Button>
+          </>
         }
       >
-        <div className='max-h-[78vh] space-y-4 overflow-y-auto py-4 pr-1'>
+        {/* The Dialog body already scrolls (see components/dialog.tsx), so this
+            wrapper must not add its own overflow — two nested scroll containers
+            rendered two scrollbars side by side. */}
+        <div className='space-y-4 py-4'>
           <DetectionConfigPanel
+            ref={detectionPanelRef}
             open={open}
             channelId={currentRow.id}
             monitoringEnabled={monitoringEnabled}
@@ -1002,77 +1029,68 @@ function ChannelTestDialogContent({
             onMonitoredModelsChange={setMonitoredModels}
             onEndpointTypeChange={handleEndpointTypeChange}
             onStreamChange={setIsStreamTest}
+            onSaveBusyChange={setDetectionSaveBusy}
           />
 
           <div className='space-y-3 max-sm:has-[div[role="toolbar"]]:pb-16'>
-            <div className='flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between'>
-              <div className='min-w-0 space-y-2'>
-                <p className='text-sm font-medium'>{t('Channel models')}</p>
-                <p className='text-muted-foreground text-xs'>
-                  {t('Select models to run batch tests.')}
-                </p>
-                <p className='text-muted-foreground text-xs'>
-                  {t(
-                    'Tests use the saved detection config, so save it first to try out template changes.'
-                  )}
-                </p>
-                <div className='flex flex-wrap items-center gap-2'>
-                  {isBatchTesting ? (
+            {/* Batch-test actions and the model filter share one row. The table
+                below is labelled by containerProps' aria-label, which is why no
+                visible heading is needed here. */}
+            <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
+              <div className='flex flex-wrap items-center gap-2'>
+                {isBatchTesting ? (
+                  <Button
+                    variant='outline'
+                    size='sm'
+                    onClick={handleStopBatchTest}
+                    disabled={isBatchStopRequested}
+                  >
+                    {isBatchStopRequested
+                      ? t('Stopping...')
+                      : t('Stop testing')}
+                  </Button>
+                ) : (
+                  <>
                     <Button
-                      variant='outline'
                       size='sm'
-                      onClick={handleStopBatchTest}
-                      disabled={isBatchStopRequested}
+                      onClick={() => handleBatchTest(filteredModels)}
+                      disabled={isAnyTesting || filteredModels.length === 0}
                     >
-                      {isBatchStopRequested
-                        ? t('Stopping...')
-                        : t('Stop testing')}
+                      {testAllButtonLabel}
                     </Button>
-                  ) : (
-                    <>
+                    {successModels.length > 0 && (
                       <Button
+                        variant='outline'
                         size='sm'
-                        onClick={() => handleBatchTest(filteredModels)}
-                        disabled={isAnyTesting || filteredModels.length === 0}
+                        onClick={handleSelectSuccessfulModels}
                       >
-                        {testAllButtonLabel}
+                        <CheckCircle2 data-icon='inline-start' />
+                        {t('Select successful models ({{count}})', {
+                          count: successModels.length,
+                        })}
                       </Button>
-                      {successModels.length > 0 && (
-                        <Button
-                          variant='outline'
-                          size='sm'
-                          onClick={handleSelectSuccessfulModels}
-                        >
-                          <CheckCircle2 data-icon='inline-start' />
-                          {t('Select successful models ({{count}})', {
-                            count: successModels.length,
-                          })}
-                        </Button>
-                      )}
-                      {failedModels.length > 0 && (
-                        <Button
-                          variant='outline'
-                          size='sm'
-                          onClick={() => setIsDeleteFailedDialogOpen(true)}
-                        >
-                          <Trash2 data-icon='inline-start' />
-                          {t('Delete failed models ({{count}})', {
-                            count: failedModels.length,
-                          })}
-                        </Button>
-                      )}
-                    </>
-                  )}
-                </div>
+                    )}
+                    {failedModels.length > 0 && (
+                      <Button
+                        variant='outline'
+                        size='sm'
+                        onClick={() => setIsDeleteFailedDialogOpen(true)}
+                      >
+                        <Trash2 data-icon='inline-start' />
+                        {t('Delete failed models ({{count}})', {
+                          count: failedModels.length,
+                        })}
+                      </Button>
+                    )}
+                  </>
+                )}
               </div>
-              <div className='flex flex-col gap-2 sm:flex-row sm:items-center'>
-                <Input
-                  placeholder={t('Filter models...')}
-                  value={searchTerm}
-                  onChange={handleSearchTermChange}
-                  className='sm:w-64'
-                />
-              </div>
+              <Input
+                placeholder={t('Filter models...')}
+                value={searchTerm}
+                onChange={handleSearchTermChange}
+                className='sm:w-64'
+              />
             </div>
 
             <div className='space-y-3'>

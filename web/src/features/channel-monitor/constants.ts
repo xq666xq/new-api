@@ -53,11 +53,17 @@ export function channelsUsingTemplate(
   return rows.filter((row) => row.config?.templateName === templateName)
 }
 
-/** A fresh default config used when configuring an unmonitored channel. */
+/**
+ * A fresh default config used when configuring an unmonitored channel. Banned-only
+ * probing plus hosting is the intended starting point: the policy engine watches the
+ * channel and only spends probes on models it has actually banned. Keep in sync with
+ * the DEFAULT_* constants in
+ * features/channels/components/dialogs/detection-config-panel.tsx.
+ */
 export function newDefaultConfig(): MonitorConfig {
   return {
     enabled: true,
-    monitorMode: 'default',
+    monitorMode: 'banned_only',
     endpointType: 'auto',
     stream: true,
     intervalSeconds: 600,
@@ -68,6 +74,6 @@ export function newDefaultConfig(): MonitorConfig {
     bodyMode: 'default',
     bodyJson: '',
     remark: '',
-    managed: false,
+    managed: true,
   }
 }

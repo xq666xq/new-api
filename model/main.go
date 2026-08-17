@@ -416,7 +416,48 @@ func migrateDBFast() error {
 	if err := dropChannelMonitorIntervalMinutes(); err != nil {
 		return err
 	}
+	if err := repairChannelMonitorChannelUniqueIndex(); err != nil {
+		return err
+	}
 	common.SysLog("database migrated")
+	return nil
+}
+
+// repairChannelMonitorChannelUniqueIndex undoes an older schema for
+// channel_monitor_configs.channel_id. It used to carry an unnamed uniqueIndex, so
+// GORM generated idx_channel_monitor_configs_channel_id without a predicate; the
+// column now declares uk_channel_monitor_channel WHERE deleted_at IS NULL.
+// AutoMigrate adds the new index but never drops the old one, and the old one
+// counts soft-deleted rows — so a channel that was removed from monitoring could
+// not be configured again: the row was hidden from the lookup but still owned
+// channel_id, and the insert failed with a duplicate key error.
+//
+// Removal is a hard delete now, so the surviving tombstones are dead data. Both
+// steps are idempotent and no-op on a fresh install.
+func repairChannelMonitorChannelUniqueIndex() error {
+	const legacyIndexName = "idx_channel_monitor_configs_channel_id"
+	if !DB.Migrator().HasTable(&ChannelMonitorConfig{}) {
+		return nil
+	}
+	// Purge first: with the tombstones gone the constraint can no longer fire, even
+	// if dropping the index below fails on a permission-restricted deployment.
+	purged := DB.Unscoped().
+		Where("deleted_at IS NOT NULL").
+		Delete(&ChannelMonitorConfig{})
+	if purged.Error != nil {
+		return fmt.Errorf("failed to purge soft-deleted channel monitor configs: %w", purged.Error)
+	}
+	if purged.RowsAffected > 0 {
+		common.SysLog(fmt.Sprintf(
+			"purged %d soft-deleted channel_monitor_configs rows", purged.RowsAffected))
+	}
+	if !DB.Migrator().HasIndex(&ChannelMonitorConfig{}, legacyIndexName) {
+		return nil
+	}
+	if err := DB.Migrator().DropIndex(&ChannelMonitorConfig{}, legacyIndexName); err != nil {
+		return fmt.Errorf("failed to drop legacy index %s: %w", legacyIndexName, err)
+	}
+	common.SysLog("dropped legacy index " + legacyIndexName)
 	return nil
 }
 
