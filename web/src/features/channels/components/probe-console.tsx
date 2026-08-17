@@ -23,6 +23,10 @@ import { cn } from '@/lib/utils'
 
 import type { ProbeConsoleLine } from '../hooks/use-streaming-probe'
 
+const BLINKING_CURSOR = (
+  <span className='bg-foreground ml-0.5 inline-block h-3.5 w-2 animate-pulse align-middle' />
+)
+
 /**
  * Terminal-style transcript of a manual probe: the assembled request summary
  * followed by decoded upstream output as it streams in.
@@ -39,8 +43,16 @@ export function ProbeConsole(props: {
     endRef.current?.scrollIntoView({ block: 'end' })
   }, [props.lines])
 
+  // While upstream text is streaming the cursor belongs at the end of that
+  // text, not on a row of its own below it.
+  const lastLine = props.lines.at(-1)
+  const cursorFollowsText = props.running && lastLine?.kind === 'text'
+
   return (
-    <div className='bg-muted/40 max-h-80 min-h-40 overflow-auto rounded-lg border p-3 font-mono text-xs leading-6'>
+    <div
+      data-slot='probe-console'
+      className='bg-muted/40 max-h-80 min-h-40 overflow-auto rounded-lg border p-3 font-mono text-xs leading-6'
+    >
       {props.lines.length === 0 && !props.running ? (
         <div className='text-muted-foreground'>
           {t('Start the probe to see live upstream output.')}
@@ -82,19 +94,20 @@ export function ProbeConsole(props: {
           <div
             key={line.id}
             className={cn(
-              'break-all whitespace-pre-wrap',
+              'break-words whitespace-pre-wrap',
               line.kind === 'label'
                 ? 'text-muted-foreground'
                 : 'text-foreground'
             )}
           >
             {line.text}
+            {cursorFollowsText && line.id === lastLine?.id
+              ? BLINKING_CURSOR
+              : null}
           </div>
         )
       })}
-      {props.running ? (
-        <span className='bg-foreground ml-0.5 inline-block h-3.5 w-2 animate-pulse align-middle' />
-      ) : null}
+      {props.running && !cursorFollowsText ? BLINKING_CURSOR : null}
       <div ref={endRef} />
     </div>
   )

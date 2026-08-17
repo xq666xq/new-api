@@ -171,9 +171,15 @@ function installApiFixtures(): void {
         channel_name: 'Primary OpenAI',
         channel_type: 1,
       })}\n\n`,
+      // Two separate relayed frames: the console must join them into one line
+      // instead of turning each transport chunk into its own row.
       `event: chunk\ndata: ${JSON.stringify({
         model_name: 'gpt-backup',
-        delta: 'data: {"choices":[{"delta":{"content":"Confirmed"}}]}\n\n',
+        delta: 'data: {"choices":[{"delta":{"content":"Con"}}]}\n\n',
+      })}\n\n`,
+      `event: chunk\ndata: ${JSON.stringify({
+        model_name: 'gpt-backup',
+        delta: 'data: {"choices":[{"delta":{"content":"firmed"}}]}\n\n',
       })}\n\n`,
       `event: result\ndata: ${JSON.stringify(probeResultEvent)}\n\n`,
       'event: end\ndata: {}\n\n',
@@ -335,6 +341,16 @@ describe('channel row detection action', () => {
     assert.match(dialog.textContent ?? '', /Reply with a short confirmation\./)
     // Raw SSE framing stays out of the console; only decoded text is printed.
     assert.doesNotMatch(dialog.textContent ?? '', /"choices"/)
+
+    // Consecutive deltas share one console row, so a word split across chunks
+    // is not rendered as two lines.
+    const probeConsole = dialog.querySelector('[data-slot="probe-console"]')
+    assert.ok(probeConsole)
+    const streamedRows = [...probeConsole.children].filter((node) =>
+      node.textContent?.includes('Confirmed')
+    )
+    assert.equal(streamedRows.length, 1)
+    assert.equal(streamedRows[0].textContent, 'Confirmed')
 
     // Switching to the trace view must still expose the full request/response
     // detail that existed before streaming was added.

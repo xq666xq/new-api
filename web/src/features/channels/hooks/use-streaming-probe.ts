@@ -61,6 +61,25 @@ export function useStreamingProbe() {
     []
   )
 
+  /**
+   * Decoded upstream deltas are one continuous assistant message, so they grow
+   * the trailing text line instead of each transport chunk becoming its own
+   * console row. Only newlines the provider actually sent break a line.
+   */
+  const appendText = useCallback((text: string) => {
+    setLines((prev) => {
+      const last = prev.at(-1)
+      if (last?.kind === 'text') {
+        return [...prev.slice(0, -1), { ...last, text: last.text + text }]
+      }
+      // Providers commonly open with blank lines; they would render as empty
+      // rows right under the request summary.
+      const opening = text.replace(/^\n+/, '')
+      if (opening === '') return prev
+      return [...prev, { id: lineIdRef.current++, kind: 'text', text: opening }]
+    })
+  }, [])
+
   const reset = useCallback(() => {
     abortRef.current?.abort()
     abortRef.current = null
@@ -111,11 +130,11 @@ export function useStreamingProbe() {
             },
             onChunk: (chunk) => {
               const text = decoder.push(chunk.delta)
-              if (text) append('text', text)
+              if (text) appendText(text)
             },
             onResult: (finalResult) => {
               const trailing = decoder.flush()
-              if (trailing) append('text', trailing)
+              if (trailing) appendText(trailing)
               append('divider', '')
               if (finalResult.success) {
                 append(
@@ -153,7 +172,7 @@ export function useStreamingProbe() {
         }
       }
     },
-    [append, t]
+    [append, appendText, t]
   )
 
   return { lines, running, result, error, run, reset, abort }
