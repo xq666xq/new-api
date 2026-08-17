@@ -81,11 +81,24 @@ const NO_SORT = '__unsorted__'
 const SORT_OPTIONS: readonly {
   value: string
   label: string
-  field?: 'successRate' | 'modelPriority'
+  field?: 'requests' | 'successRate' | 'modelPriority'
   dir?: 1 | -1
   adminOnly: boolean
 }[] = [
-  { value: NO_SORT, label: 'Default order', adminOnly: false },
+  {
+    value: 'requests-desc',
+    label: 'Requests: High to Low',
+    field: 'requests',
+    dir: -1,
+    adminOnly: false,
+  },
+  {
+    value: 'requests-asc',
+    label: 'Requests: Low to High',
+    field: 'requests',
+    dir: 1,
+    adminOnly: false,
+  },
   {
     value: 'success-rate-asc',
     label: 'Success Rate: Low to High',
@@ -114,7 +127,15 @@ const SORT_OPTIONS: readonly {
     dir: -1,
     adminOnly: true,
   },
+  { value: NO_SORT, label: 'Original order', adminOnly: false },
 ]
+
+/**
+ * Landing sort: busiest first, so the models actually carrying traffic lead the
+ * list. It is the first option, which doubles as the fallback for the trigger
+ * label and the target of "Clear filters", keeping the three in sync.
+ */
+const DEFAULT_SORT = SORT_OPTIONS[0]
 
 /** Sentinel for the unfiltered routing-status view. */
 const ALL_STATUS = '__all_status__'
@@ -789,7 +810,7 @@ export function ChannelStatus() {
   const [channelQuery, setChannelQuery] = useState('')
   const [modelQuery, setModelQuery] = useState('')
   const [tag, setTag] = useState<string>(ALL_TAGS)
-  const [sort, setSort] = useState<string>(NO_SORT)
+  const [sort, setSort] = useState<string>(DEFAULT_SORT.value)
   const [status, setStatus] = useState<string>(ALL_STATUS)
   // Admins see per-channel rows with channel identity; normal members see the
   // same data aggregated by model with channel identity stripped. isAdmin gates
@@ -857,7 +878,7 @@ export function ChannelStatus() {
     modelQuery.trim() !== '' ||
     tag !== ALL_TAGS ||
     status !== ALL_STATUS ||
-    sort !== NO_SORT
+    sort !== DEFAULT_SORT.value
 
   return (
     <SectionPageLayout>
@@ -960,8 +981,10 @@ export function ChannelStatus() {
               <SelectTrigger className='w-[190px]' aria-label={t('Sort')}>
                 <SelectValue>
                   {t(
-                    SORT_OPTIONS.find((option) => option.value === sort)
-                      ?.label ?? 'Default order'
+                    (
+                      SORT_OPTIONS.find((option) => option.value === sort) ??
+                      DEFAULT_SORT
+                    ).label
                   )}
                 </SelectValue>
               </SelectTrigger>
@@ -985,7 +1008,7 @@ export function ChannelStatus() {
                   setModelQuery('')
                   setTag(ALL_TAGS)
                   setStatus(ALL_STATUS)
-                  setSort(NO_SORT)
+                  setSort(DEFAULT_SORT.value)
                 }}
               >
                 {t('Clear filters')}
