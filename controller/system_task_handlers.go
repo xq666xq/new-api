@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -12,7 +13,6 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
-	"golang.org/x/sync/errgroup"
 )
 
 // RegisterScheduledSystemTasks wires the periodic channel test, upstream model
@@ -80,11 +80,22 @@ type channelMonitorProbeJob struct {
 
 type channelMonitorProbeExecutor func(context.Context, channelMonitorProbeJob) (*model.ChannelMonitorResult, error)
 
+// channelMonitorProbeWatchdogGrace is the slack added on top of the per-probe
+// timeout to bound the work inside a probe that the inner deadline does not
+// cover — channel loading and result persistence around the relay call, or a
+// future relay path that forgets to derive its own deadline. It cannot force a
+// worker that ignores cancellation to return: the batch always waits for every
+// worker so nothing writes into results after it returns.
+const channelMonitorProbeWatchdogGrace = 15 * time.Second
+
 // executeChannelMonitorProbeBatch runs channel/model probes with bounded
-// concurrency. A queued probe receives no probe timeout until its worker starts
-// executing it, so waiting for a slot cannot turn an unstarted probe into a
-// timeout failure. Results keep the same order as jobs for deterministic task
-// summaries and tests.
+// concurrency. Every job in the batch is probed to completion: a failing probe
+// records its error but never skips the jobs still queued behind it, and each
+// job carries an independent watchdog so one unresponsive upstream cannot stall
+// the rest of the sweep. A queued probe receives no probe timeout until its
+// worker starts executing it, so waiting for a slot cannot turn an unstarted
+// probe into a timeout failure. Results keep the same order as jobs for
+// deterministic task summaries and tests.
 func executeChannelMonitorProbeBatch(
 	ctx context.Context,
 	jobs []channelMonitorProbeJob,
@@ -102,23 +113,48 @@ func executeChannelMonitorProbeBatch(
 		concurrency = len(jobs)
 	}
 
-	group, groupCtx := errgroup.WithContext(ctx)
-	group.SetLimit(concurrency)
+	watchdogTimeout := operation_setting.GetChannelMonitorProbeTimeout() + channelMonitorProbeWatchdogGrace
+	semaphore := make(chan struct{}, concurrency)
+	errs := make([]error, len(jobs))
+	var wg sync.WaitGroup
+
+dispatch:
 	for index := range jobs {
-		index := index
-		group.Go(func() error {
-			if err := groupCtx.Err(); err != nil {
-				return err
+		select {
+		case semaphore <- struct{}{}:
+		case <-ctx.Done():
+			// The sweep itself was cancelled (task stop or shutdown). Record the
+			// cancellation for every job that never got a worker, then stop.
+			for remaining := index; remaining < len(jobs); remaining++ {
+				errs[remaining] = ctx.Err()
 			}
-			result, err := execute(groupCtx, jobs[index])
+			break dispatch
+		}
+
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			defer func() { <-semaphore }()
+
+			jobCtx, cancel := context.WithTimeout(ctx, watchdogTimeout)
+			defer cancel()
+
+			result, err := execute(jobCtx, jobs[index])
 			if err != nil {
-				return err
+				errs[index] = err
+				return
 			}
 			results[index] = result
-			return nil
-		})
+		}(index)
 	}
-	return results, group.Wait()
+
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return results, err
+		}
+	}
+	return results, nil
 }
 
 func selectMonitorQuestion(questions []*model.MonitorQuestion) (int, string) {
@@ -396,9 +432,12 @@ func runChannelMonitorTask(ctx context.Context) (channelMonitorTaskResult, error
 			finishedAtByChannel[record.ChannelId] = record.CheckedAt
 		}
 	}
-	if probeErr != nil {
-		return summary, probeErr
-	}
+	// probeErr is deliberately not returned yet. Returning it here left every
+	// config in this sweep with its old next_check_at, so the whole batch stayed
+	// due and was re-selected on the next 15s tick. The policy below and the
+	// schedule writes must run first; probeErr is returned at the end, so the task
+	// still ends up failed.
+
 	// Apply the channel-managed policy once the whole sweep is done: the speed
 	// stage ranks channels against each other, so it needs every managed channel's
 	// fresh probe data in this cycle. Best-effort inside the engine — it never
@@ -428,7 +467,7 @@ func runChannelMonitorTask(ctx context.Context) (channelMonitorTaskResult, error
 			return summary, err
 		}
 	}
-	return summary, nil
+	return summary, probeErr
 }
 
 // channelTestHandler runs the scheduled "test all channels" job. Enablement and

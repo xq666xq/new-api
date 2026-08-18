@@ -138,7 +138,7 @@ func TestExecuteChannelMonitorProbeBatchZeroStartsEveryJob(t *testing.T) {
 	}
 }
 
-func TestExecuteChannelMonitorProbeBatchSkipsQueuedJobsAfterFailure(t *testing.T) {
+func TestExecuteChannelMonitorProbeBatchProbesEveryJobDespiteFailure(t *testing.T) {
 	jobs := []channelMonitorProbeJob{
 		{modelName: "model-a"},
 		{modelName: "model-b"},
@@ -151,18 +151,23 @@ func TestExecuteChannelMonitorProbeBatchSkipsQueuedJobsAfterFailure(t *testing.T
 		context.Background(),
 		jobs,
 		1,
-		func(context.Context, channelMonitorProbeJob) (*model.ChannelMonitorResult, error) {
+		func(_ context.Context, job channelMonitorProbeJob) (*model.ChannelMonitorResult, error) {
 			calls.Add(1)
-			return nil, wantErr
+			if job.modelName == "model-a" {
+				return nil, wantErr
+			}
+			return &model.ChannelMonitorResult{ModelName: job.modelName}, nil
 		},
 	)
 
 	require.ErrorIs(t, err, wantErr)
-	assert.Equal(t, int32(1), calls.Load())
-	assert.Len(t, results, len(jobs))
-	for _, result := range results {
-		assert.Nil(t, result)
-	}
+	assert.Equal(t, int32(len(jobs)), calls.Load())
+	require.Len(t, results, len(jobs))
+	assert.Nil(t, results[0])
+	require.NotNil(t, results[1])
+	assert.Equal(t, "model-b", results[1].ModelName)
+	require.NotNil(t, results[2])
+	assert.Equal(t, "model-c", results[2].ModelName)
 }
 
 func TestChannelMonitorModelsForSweepHonorsBannedOnlyMode(t *testing.T) {

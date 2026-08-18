@@ -565,6 +565,18 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		}
 	}
 
+	// A monitor probe carries its own deadline on the gin request context (see
+	// executeChannelMonitorProbe). The upstream request is built with
+	// http.NewRequest, whose context is Background, so without re-binding it the
+	// probe timeout never bounds the upstream round trip: RELAY_TIMEOUT defaults to
+	// 0 (no client timeout) and the transport sets no ResponseHeaderTimeout, which
+	// leaves "connected but no response headers" unbounded. Only probes are
+	// re-bound, so ordinary forwarding keeps its existing cancellation behavior.
+	// This runs before AttachRequest because the trace derives its own context
+	// from req.Context().
+	if info.IsChannelMonitor && c != nil && c.Request != nil {
+		req = req.WithContext(c.Request.Context())
+	}
 	if info.IsChannelMonitor && info.MonitorTrace != nil {
 		req = info.MonitorTrace.AttachRequest(req)
 	}
